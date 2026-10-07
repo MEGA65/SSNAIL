@@ -10,7 +10,9 @@ Supported architectures (GGUF general.architecture):
     gpt2    GPT-2 family, e.g. the TinyStories GPT-2 models             (decoder)
     bert    BERT family, e.g. all-MiniLM sentence embedders             (encoder)
 
-The image is loaded at $8000000 (attic RAM).  Layout, low to high:
+The image is loaded at $8000000 in SSNAIL's address space (HyperRAM on R3,
+SDRAM on R4-R6), with the same layout for every size; see ssnail_isa.py.
+Layout, low to high:
 
     $8000000  header + runtime block (256 bytes)
     $8000100  SSNAIL script
@@ -85,8 +87,8 @@ def too_big_message(m, gguf_path, mem_mb, ctx_given):
     stem = stem[:-5] if stem.endswith(".gguf") else stem
     need = matrix_params(m) * 4.5 / 8 * 1.05 + 2 * 1048576
     lines = [f"{stem} does not fit in {mem_mb:g} MB"
-             + (" of attic RAM." if mem_mb == 8 else ".")]
-    opts = [(72, "attic RAM + SDRAM"), (64, "SDRAM, leaving attic RAM free")]
+             + (" (the size that works on every board)." if mem_mb == 8 else ".")]
+    opts = [(72, "SDRAM, then HyperRAM"), (64, "all in SDRAM")]
     fits = [(mb, what) for mb, what in opts if mb > mem_mb and need <= mb * 1048576]
     if fits:
         lines.append("On an R4-R6 (with SDRAM), use a larger memory size:")
@@ -95,7 +97,7 @@ def too_big_message(m, gguf_path, mem_mb, ctx_given):
         lines.append(f"  or ATTICRAM={fits[0][0]} make {stem}.chat   "
                      f"(python: --mem-mb {fits[0][0]})")
     elif mem_mb < 72:
-        lines.append("It is probably too big even for 72 MB (attic RAM + SDRAM).")
+        lines.append("It is probably too big even for 72 MB (SDRAM + HyperRAM).")
     lines.append("Or try a smaller context: CONTEXT_WINDOW=128 (python: --ctx 128).")
     return "\n".join(lines)
 
@@ -371,27 +373,21 @@ class Builder:
         self.mem_mb = mem_mb
         self.big = mem_mb > 8
         self.header = bytearray(I.HEADER_SIZE)
-        if not self.big:
-            self.base = I.HYPERRAM_BASE + I.HEADER_SIZE
-            self.top = I.HYPERRAM_BASE + int(mem_mb * 0x100000)
-        elif mem_mb == 64:
-            self.base, self.top = I.SDRAM_BASE, I.MEM_TOP
-        else:
-            self.base = I.WINDOW_END
-            self.top = min(I.MEM_TOP, I.HYPERRAM_BASE + int(mem_mb * 0x100000))
-        if self.big and ctx + 1 > I.TOKENS_AREA_SIZE // 4:
-            raise SystemExit(f"--ctx {ctx} too large: the host window holds "
+        # One layout for every size (see ssnail_isa.py): the window, then
+        # everything else contiguously from WINDOW_END.
+        self.base = I.WINDOW_END
+        self.top = I.HYPERRAM_BASE + int(mem_mb * 0x100000)
+        if ctx + 1 > I.TOKENS_AREA_SIZE // 4:
+            raise SystemExit(f"--ctx {ctx} too large: the token buffer holds "
                              f"{I.TOKENS_AREA_SIZE // 4 - 1} tokens")
         self.data = bytearray()          # payload, loaded at self.base
         self.lossy = []                  # weights stored with fewer bits than the source
-        # 64 MB images: the CPU-side tables go in a separate host segment in
-        # attic RAM, after the host window; the model goes to SDRAM.
-        self.host = bytearray() if mem_mb == 64 else None
-        self.host_base = I.WINDOW_END
+        self.host = None                 # (no separate segment any more)
+        self.host_base = 0
         self.log = []
         self.code_slots = 64 + 64 * p["n_layers"]
         self.code_addr = self.add(bytes(16 * self.code_slots), align=16)
-        self.vocab()     # CPU-side tables early, so they stay in attic RAM
+        self.vocab()     # CPU-side tables early: in the first RAM on every board
         self.scratch = None
         self.A = Asm()
 
@@ -400,24 +396,30 @@ class Builder:
         return self.base + len(self.data)
 
     def patch(self, addr, blob):
-        o = addr - self.base
-        self.data[o:o + len(blob)] = blob
+        """Overwrite bytes already added, in whichever region they went to."""
+        if self.host is not None and self.host_base <= addr < self.host_base + len(self.host):
+            o = addr - self.host_base
+            self.host[o:o + len(blob)] = blob
+        else:
+            o = addr - self.base
+            assert 0 <= o and o + len(blob) <= len(self.data), f"patch outside image: ${addr:07X}"
+            self.data[o:o + len(blob)] = blob
 
     def tokens(self):
-        """Token buffer: in the host window for big images, else last."""
-        self.tokens_addr = I.TOKENS_AREA if self.big else self.scratch
+        self.tokens_addr = I.TOKENS_AREA
         return self.tokens_addr
 
     def output_buffer(self, nbytes):
-        if self.big:
-            if nbytes > I.OUTPUT_AREA_SIZE:
-                raise SystemExit("output vector too large for the host window")
-            return I.OUTPUT_AREA
-        return self.salloc(nbytes)
+        if nbytes > I.OUTPUT_AREA_SIZE:
+            raise SystemExit("output vector too large for the window")
+        return I.OUTPUT_AREA
 
     def add(self, blob, align=32):
         while len(self.data) % align:
             self.data.append(0)
+        if self.here < I.SD_END < self.here + len(blob):
+            # never straddle SDRAM / HyperRAM: start at HyperRAM instead
+            self.data += bytes(I.SD_END - self.here)
         addr = self.here
         self.data += blob
         return addr
@@ -460,16 +462,11 @@ class Builder:
         return self.add(b"".join(self.m.tensor_f32(n).astype("<f4").tobytes() for n in names))
 
     def add_host(self, blob, align=32):
-        """Add a table the CPU reads: it must land in attic RAM."""
-        if self.host is None:
-            addr = self.add(blob, align)
-            if addr + len(blob) > I.SDRAM_BASE:
-                raise SystemExit("internal error: host table beyond attic RAM")
-            return addr
-        while len(self.host) % align:
-            self.host.append(0)
-        addr = self.host_base + len(self.host)
-        self.host += blob
+        """A table the CPU reads.  These are added first, so they are in the
+        first RAM (the one the CPU maps at $8000000)."""
+        addr = self.add(blob, align)
+        if addr + len(blob) > I.SD_END:
+            raise SystemExit("internal error: CPU table beyond the first RAM")
         return addr
 
     def vocab(self):
@@ -571,8 +568,9 @@ class Builder:
         self.scratch = self.file_end
 
     def salloc(self, nbytes):
+        n = (nbytes + 255) // 256 * 256
         a = self.scratch
-        self.scratch += (nbytes + 255) // 256 * 256
+        self.scratch += n
         return a
 
     def report(self, mem_mb):
@@ -590,7 +588,7 @@ class Builder:
               f"scratch to ${self.scratch:07X}; tokens at ${self.tokens_addr:07X}")
         cfg = I.MEM_CONFIGS.get(mem_mb, "custom")
         print(f"memory used to ${top - 1:07X} with {self.ctx}-token context ({mem_mb:g} MB: {cfg})")
-        print(f"tokenizer: {self.tok_bytes / 1024:.0f} KB of encode tables in attic RAM "
+        print(f"tokenizer: {self.tok_bytes / 1024:.0f} KB of encode tables "
               f"(plus the vocab table)")
 
     def finish(self, output, outdim, flags, hyperram_mb, verbose):
@@ -611,37 +609,27 @@ class Builder:
                      (I.H_PAYLOAD_LEN, len(self.data)),
                      (I.H_OUTPUT, output), (I.H_OUTDIM, outdim)):
             H[f:f + 4] = struct.pack("<I", v & 0xFFFFFFFF)
-        if self.big:
-            top = self.scratch
-            memcfg = bytes([8, 0x88, 64, 0])
-            staging = (I.STAGING_AREA, I.STAGING_SIZE)
-        else:
-            top = self.tokens_addr + 4 * (self.ctx + 1)
-            memcfg = bytes([8, 0, 0, 0])
-            staging = (0, 0)
+        top = self.scratch
         total = top - I.HYPERRAM_BASE
-        host_len = len(self.host) if self.host is not None else 0
-        host_len += -host_len % 256
-        if self.host is not None:
-            self.host += bytes(host_len - len(self.host))
-        for f, v in ((I.H_HOST_BASE, self.host_base if host_len else 0), (I.H_HOST_LEN, host_len),
+        for f, v in ((I.H_HOST_BASE, 0), (I.H_HOST_LEN, 0),
                      (I.H_TOKENIZER, self.tok_addr),
                      (I.H_MEM_NEEDED, total), (I.H_ARCH, I.ARCH_CODES[m.arch]),
-                     (I.H_LOAD_BASE, self.base), (I.H_STAGING, staging[0]),
-                     (I.H_STAGING_SIZE, staging[1])):
+                     (I.H_LOAD_BASE, self.base), (I.H_STAGING, 0),
+                     (I.H_STAGING_SIZE, 0)):
             H[f:f + 4] = struct.pack("<I", v & 0xFFFFFFFF)
+        memcfg = bytes(4)
         H[I.H_MEMCFG:I.H_MEMCFG + 4] = memcfg
 
-        # Write a brief description at 0x80
+        # A brief description at H_DESC, NUL-terminated: name (arch) [type]
         name = m.field("general.name")
         specialty = getattr(self, 'model_type', 'General')
         if name:
             desc = f"{name} ({m.arch}) [{specialty}]"
         else:
+            p = self.p
             desc = f"{m.arch} {p['dim']}d {p['n_layers']}L {p['n_heads']}H [{specialty}]"
-        desc_bytes = desc.encode('utf-8')[:127]
-        H[0x80:0x80 + len(desc_bytes) + 1] = desc_bytes + b'\x00'
-
+        desc_bytes = desc.encode('utf-8')[:I.H_DESC_SIZE - 1]
+        H[I.H_DESC:I.H_DESC + len(desc_bytes) + 1] = desc_bytes + b'\x00'
         self._code_len, self._top = len(code), top
         if top > self.top:
             raise ImageTooBig(f"Image needs {total / 1048576:.2f} MB, more than the "
@@ -1000,7 +988,8 @@ def build_bert(b):
 BUILDERS = dict(llama=build_llama, gpt2=build_gpt2, bert=build_bert)
 
 
-def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16", model_type="General"):
+def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16",
+            model_type="General"):
     """confirm(message) -> bool is asked before 'auto' stores weights with
     fewer bits than an already-quantised source; None = never ask."""
     if policy == "auto":
@@ -1076,9 +1065,11 @@ def main():
     c.add_argument("--fallback", default="q8_0", choices=list(FMT_BY_NAME),
                    help="format for weights not natively supported (with --wtype keep)")
     c.add_argument("--mem-mb", "--hyperram-mb", dest="hyperram_mb", type=float, default=8,
-                   help="linear memory from $8000000 available to the image: 8 (attic RAM), "
+                   help="memory from $8000000 available to the image: 8 (any board), "
                         "64 (SDRAM) or 72 (both, R6); default 8")
-    c.add_argument("--type", default="General", help="Specialty type of the model (e.g. Story, Code)")
+    c.add_argument("--type", default="General",
+                   help="specialty of the model, e.g. Story, Code (default General); "
+                        "recorded in the header description")
     t = sub.add_parser("tokenize", help="print token ids for a prompt")
     t.add_argument("gguf")
     t.add_argument("text")

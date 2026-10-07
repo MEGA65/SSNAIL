@@ -348,7 +348,8 @@ def load_image(m, image):
             pass
         sector = image[sec:sec + 512]
         cut = sec
-        for s0 in sorted(k for k in seg_starts if sec < k < sec + len(sector)):
+        # a segment may start anywhere in the sector, including its first byte
+        for s0 in sorted(k for k in seg_starts if k > 0 and sec <= k < sec + len(sector)):
             lp.write(sector[cut - sec:s0 - sec])
             lp.commit(seg_starts[s0])
             cut = s0
@@ -361,6 +362,12 @@ def load_image(m, image):
 
 
 # --- Host-side helpers (what MEGA65 software would do) -------------------------
+def description(m):
+    """The image's description (header H_DESC): "name (arch) [type]"."""
+    raw = bytes(m.mem[I.H_DESC:I.H_DESC + I.H_DESC_SIZE])
+    return raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+
+
 def header(m, field):
     return struct.unpack("<I", m.mem[field:field + 4])[0]
 
