@@ -361,8 +361,9 @@ def rowbytes(fmt, n):
 
 
 class Builder:
-    def __init__(self, m, p, ctx, policy, fallback, mem_mb, kv="f16"):
+    def __init__(self, m, p, ctx, policy, fallback, mem_mb, kv="f16", model_type="General"):
         self.m, self.p, self.ctx = m, p, ctx
+        self.model_type = model_type
         self.kv16 = kv == "f16"
         self.kv_esz = 2 if self.kv16 else 4
         self.kv_fmt = I.KV_F16 if self.kv16 else I.KV_F32
@@ -630,6 +631,17 @@ class Builder:
                      (I.H_STAGING_SIZE, staging[1])):
             H[f:f + 4] = struct.pack("<I", v & 0xFFFFFFFF)
         H[I.H_MEMCFG:I.H_MEMCFG + 4] = memcfg
+
+        # Write a brief description at 0x80
+        name = m.field("general.name")
+        specialty = getattr(self, 'model_type', 'General')
+        if name:
+            desc = f"{name} ({m.arch}) [{specialty}]"
+        else:
+            desc = f"{m.arch} {p['dim']}d {p['n_layers']}L {p['n_heads']}H [{specialty}]"
+        desc_bytes = desc.encode('utf-8')[:127]
+        H[0x80:0x80 + len(desc_bytes) + 1] = desc_bytes + b'\x00'
+
         self._code_len, self._top = len(code), top
         if top > self.top:
             raise ImageTooBig(f"Image needs {total / 1048576:.2f} MB, more than the "
@@ -988,13 +1000,13 @@ def build_bert(b):
 BUILDERS = dict(llama=build_llama, gpt2=build_gpt2, bert=build_bert)
 
 
-def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16"):
+def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16", model_type="General"):
     """confirm(message) -> bool is asked before 'auto' stores weights with
     fewer bits than an already-quantised source; None = never ask."""
     if policy == "auto":
         for pol, what in AUTO_ORDER:
             try:
-                b = build(m, ctx, pol, fallback, hyperram_mb, kv)
+                b = build(m, ctx, pol, fallback, hyperram_mb, kv, model_type)
             except ImageTooBig:
                 continue
             if b.lossy and confirm is not None:
@@ -1016,7 +1028,7 @@ def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, k
                 b.report(hyperram_mb)
             return b.image
         raise ImageTooBig(f"Does not fit in {hyperram_mb:g} MB even with Q4_0 weights")
-    b = build(m, ctx, policy, fallback, hyperram_mb, kv)
+    b = build(m, ctx, policy, fallback, hyperram_mb, kv, model_type)
     if verbose:
         b.report(hyperram_mb)
         if b.lossy:
@@ -1024,11 +1036,11 @@ def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, k
     return b.image
 
 
-def build(m, ctx, policy, fallback, hyperram_mb, kv="f16"):
+def build(m, ctx, policy, fallback, hyperram_mb, kv="f16", model_type="General"):
     p = params(m)
     if ctx is None:
         ctx = min(p["ctx_train"], 256 if m.arch != "bert" else 128)
-    b = Builder(m, p, ctx, policy, fallback, hyperram_mb, kv)
+    b = Builder(m, p, ctx, policy, fallback, hyperram_mb, kv, model_type)
     output, outdim, flags = BUILDERS[m.arch](b)
     b.image = b.finish(output, outdim, flags, hyperram_mb, verbose=False)
     return b
@@ -1066,6 +1078,7 @@ def main():
     c.add_argument("--mem-mb", "--hyperram-mb", dest="hyperram_mb", type=float, default=8,
                    help="linear memory from $8000000 available to the image: 8 (attic RAM), "
                         "64 (SDRAM) or 72 (both, R6); default 8")
+    c.add_argument("--type", default="General", help="Specialty type of the model (e.g. Story, Code)")
     t = sub.add_parser("tokenize", help="print token ids for a prompt")
     t.add_argument("gguf")
     t.add_argument("text")
@@ -1078,7 +1091,7 @@ def main():
     if args.cmd == "convert":
         try:
             image = convert(m, args.ctx, args.wtype, FMT_BY_NAME[args.fallback], args.hyperram_mb,
-                            confirm=ask, kv=args.kv)
+                            confirm=ask, kv=args.kv, model_type=args.type)
         except ImageTooBig:
             raise SystemExit(too_big_message(m, args.gguf, args.hyperram_mb, args.ctx is not None))
         open(args.output, "wb").write(image)
