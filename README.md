@@ -28,15 +28,13 @@ make foo.tokcheck [TEXT=file.txt]        # image tokenizer vs the GGUF's
 make test
 ```
 
-Memory sizes:
+Model type: `TYPE=Story make foo.chat` (python: `--type Story`) records a
+specialty in the image's description (header $80); the default is `General`.
+The chat program shows the description when it starts.
 
-| Target | Memory | Where the model goes |
-|---|---|---|
-| `foo.8mb.ssnail` (= `foo.ssnail`) | attic RAM, all boards | everything from $8000000 |
-| `foo.64mb.ssnail` | R4–R6 | SDRAM ($8800000 on), plus the 64 KB host window; leaves $8010000–$87FFFFF of attic RAM free |
-| `foo.72mb.ssnail` | R4–R6 | from $8010000 through attic RAM and on into SDRAM |
-
-See "Large images and the host window" below for how these are loaded.
+Memory sizes: `foo.8mb.ssnail` (= `foo.ssnail`, any board), `foo.64mb.ssnail`
+(R4–R6, all in SDRAM) and `foo.72mb.ssnail` (R4–R6, SDRAM then HyperRAM).  The
+layout is the same for all of them; see "Memory map and loading".
 
 `WTYPE` defaults to `auto`, which tries in turn: the file's own formats,
 Q8_0, `mixed` (Q8_0 layers with the large embedding/classifier at Q4_0), then
@@ -62,7 +60,7 @@ python3 tests/test_gpt2_bert.py
 ## Tokenizer in the image
 
 Images are self-contained: everything needed to turn typed text into tokens
-and tokens back into text is in the image, in attic RAM where the CPU can
+and tokens back into text is in the image, near $8000000 where the CPU can
 read it.  `ssnail_tok.py` is the reference implementation of exactly what
 the MEGA65-native tokenizer will do: binary searches over a sorted index,
 short string compares, and a per-token merge priority.
@@ -119,58 +117,60 @@ Lily, Ben's mommy"); sampling at 0.7–1.0 with top-k 40 reads much better, and
 is a strong argument for hardware sampling (an LFSR plus a cumulative-sum
 scan over the logits).
 
-## Large images and the host window
+## Memory map and loading
 
-Terminology: *attic RAM* is the 8 MB the CPU sees at $8000000 (HyperRAM
-on every board).  SDRAM (R4–R6) is reachable only through SSNAIL.  SSNAIL's
-own region registers keep the chip names ("HyperRAM size", "SDRAM base").
+SSNAIL's address map puts the faster memory first.  Its region registers
+default to:
 
-Images bigger than 8 MB use SSNAIL's R4–R6 map: attic RAM at $8000000, SDRAM
-at $8800000 (SSNAIL registers: HyperRAM size 8, SDRAM base $88, size 64; the
-header's `$60` bytes say so).  The CPU only ever sees attic RAM, so the first
-64 KB of attic RAM is a **host window** that the CPU and SSNAIL share:
+| SSNAIL address | R3 | R4–R6 |
+|---|---|---|
+| $8000000–$87FFFFF | HyperRAM | SDRAM |
+| $8800000–$BFFFFFF | — | SDRAM |
+| $C000000–$C7FFFFF | — | HyperRAM |
+
+Every image uses the same layout from $8000000, so an image of 8 MB or less
+is byte-identical whichever board it runs on.  `--mem-mb` (or the
+`8mb`/`64mb`/`72mb` targets) only sets how much memory the converter may use.
 
 | Address | Contents |
 |---|---|
 | $8000000 | Header and runtime block |
-| $8000080 | Loader job: 4 instruction slots |
+| $8000080 | 4 instruction slots for host-built jobs |
 | $8000100 | Output vector (BERT embedding), up to 3840 bytes |
 | $8001000 | Token buffer, 16 KB (up to 4095 tokens of context) |
-| $8005000 | Staging buffer, 44 KB |
-| $8010000 | (72 MB images: the model starts here) |
+| $8005000 | Script, vocab and tokenizer tables, weights, then scratch |
 
-The CPU reads tokens and outputs directly from the window, so nothing has to
-be read back out of SDRAM at run time.
+In 72 MB images, no weight tensor straddles $C000000 (GEMV streams each
+matrix from one RAM); the converter starts a tensor that would cross it at
+$C000000 instead.
 
-**Loading.**  Attic RAM and SDRAM both respond at $8000000-$87FFFFF on the
-CPU side, so the CPU can't write a big image itself.  Instead it streams the
-file through SSNAIL's **load port**, which writes each byte wherever the
-SSNAIL address map says (attic RAM or SDRAM):
+**CPU access.**  The header, runtime block, tokens, vocab and tokenizer
+tables are all near $8000000, in whichever RAM SSNAIL puts there.  The CPU
+reads them by mapping that RAM at $8000000 (SDRAM when SSNAIL's capabilities
+register reports it, HyperRAM otherwise), and writes through SSNAIL's load
+port.
+
+**Loading** a file (header, then payload loaded at header `$64`, $8005000):
+
+1. Commit the load pointer to $8000000 with bit 6 set (clear ERROR).
+2. For each 512-byte sector of the file: wait for READY, have the SD card
+   controller read the sector, DMA it to $FFD7518 (destination held), and
+   move on.  At the payload's start (file offset 256, inside the first
+   sector), DMA up to it, commit the pointer to the payload address, then DMA
+   the rest.  A segment can start exactly on a sector boundary too.
+3. Commit once more at the end to flush, wait for READY, and check ERROR.
 
 | Register | Use |
 |---|---|
-| $FFD7514-$FFD7516 | Load pointer bits 0-23 (staged until $17 is written) |
+| $FFD7514–$FFD7516 | Load pointer bits 0-23 (staged until $17 is written) |
 | $FFD7517 | Write: pointer bits 24-27, and commit (flushing any pending bytes to the old pointer first); bit 6 also clears ERROR.  Read: bit 7 READY, bit 6 ERROR |
 | $FFD7518 | Data: one byte per write, at the pointer, which advances |
 
-The loader:
-
-1. Set SSNAIL's region registers from header `$60`.
-2. Set the pointer to $8000000 and commit, with bit 6 set (clear ERROR).
-3. For each 512-byte sector of the file: wait for READY, have the SD card
-   controller read the sector, DMA it to $FFD7518 (destination held), and
-   move on.  Where a segment boundary falls inside a sector (header -> host
-   segment -> payload; see header `$64`, `$70`, `$74`), DMA up to the
-   boundary, write the next segment's address to the pointer and commit,
-   then DMA the rest.  No sector alignment is needed.
-4. Commit once more at the end to flush, wait for READY, and check ERROR.
-
 SSNAIL buffers bytes in a 1 KB ring indexed by destination address, and
 writes each 256-byte block to RAM as soon as the pointer leaves it, followed
-by a cache invalidate on that RAM port.  READY means there is room for
-another 512 bytes, no commit is outstanding, and no job is running.  The
-emulator loads every image this way, so the protocol is exercised on each
-run.  (The host window's 44 KB staging buffer is no longer used by loading.)
+by a cache invalidate on that RAM.  READY means there is room for another
+512 bytes, no commit is outstanding, and no job is running.  The emulator
+loads every image this way.
 
 ## Getting models
 
@@ -246,19 +246,17 @@ create them for the test).  The repack path is exercised with F32 → Q4_0.
 
 ## Memory image layout
 
-The image is loaded at $8000000 (attic RAM):
+Every image has the same layout from $8000000 (see "Memory map and loading"):
 
 | Address | Contents |
 |---|---|
 | $8000000 | Header and runtime block (256 bytes) |
-| $8000100 | SSNAIL script: the complete per-token program, looping |
-| ... | Weights, norm vectors, RoPE table, vocab table, attention parameter blocks |
+| $8000100 | Output vector |
+| $8001000 | Token buffer (u32 per token) |
+| $8005000 | SSNAIL script: the complete per-token program, looping |
+| ... | Vocab and tokenizer tables, weights, norm vectors, RoPE table, attention parameter blocks |
 | *end of file* | |
 | `H_SCRATCH` | Activations and KV cache (not in the file; no need to load or clear) |
-| `H_TOKENS` | Token buffer (u32 per token), last so it is open-ended |
-
-(That is the 8 MB layout.  Larger images keep the header, tokens and outputs in
-a 64 KB host window at $8000000; see "Large images and the host window".)
 
 ### Header (static, written by the converter)
 
@@ -275,17 +273,18 @@ a 64 KB host window at $8000000; see "Large images and the host window".)
 | $20 | Maximum context (KV cache capacity) |
 | $24 | BOS token |
 | $28 | EOS token |
-| $2C | Payload length in bytes (the file is the 256-byte header, then the host segment if any, then the payload) |
+| $2C | Payload length in bytes (the file is the 256-byte header, then the payload) |
 | $30 | Address of the f32 output vector: logits, or the pooled embedding for encoders |
 | $34 | Length of the output vector |
 | $38 | Bytes of memory needed from $8000000, including scratch, KV cache and token buffer |
 | $3C | Architecture: 0 llama, 1 gpt2, 2 bert |
-| $60 | SSNAIL region setup: bytes HyperRAM MB, SDRAM base MB, SDRAM MB, 0 |
-| $64 | Payload load address ($8000100 for 8 MB images, so the file is a plain memory image) |
-| $68 | Staging buffer address (0 = load directly) |
-| $6C | Staging buffer size |
-| $70 | Host segment address (64 MB images: CPU-side tables in attic RAM at $8010000) |
-| $74 | Host segment length (0 = the tables are in the payload, already in attic RAM) |
+| $60 | (unused, 0: SSNAIL's default region registers are right for every board) |
+| $64 | Payload load address ($8005000) |
+| $68 | (unused, 0) |
+| $6C | (unused, 0) |
+| $70 | (unused, 0) |
+| $74 | (unused, 0) |
+| $80–$FF | Description, NUL-terminated UTF-8: `name (arch) [type]` (or `arch dims [type]` without a name); the type comes from `convert --type`, default `General` |
 | $78 | Tokenizer block address (format in `ssnail_isa.py`) |
 
 Header `$06` flags: bit 0 set = encoder image (BERT).
@@ -303,10 +302,10 @@ Header `$06` flags: bit 0 set = encoder image (BERT).
 
 ### Running a generation (what MEGA65 software does)
 
-1. Load the image file at $8000000 (larger images: see the loading steps
-   under "Large images and the host window").
+1. Load the image through the load port (see "Memory map and loading").
 2. Write the prompt tokens to `H_TOKENS`, then set `pos = 0`,
-   `prompt_len`, `n_generate`, `stop_request = 0`.
+   `prompt_len`, `n_generate`, `stop_request = 0`, all through the load
+   port.  Read results by mapping the RAM SSNAIL has at $8000000.
 3. Write the address at header $08 to the SSNAIL job pointer, then set GO.
 4. While SSNAIL is busy, poll `generated`.  Each new token is at
    `tokens[prompt_len + generated - 1]`.  Decode it with the vocab table.

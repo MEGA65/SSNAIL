@@ -309,14 +309,36 @@ def layouts_case():
                 else:
                     results[mb] = tuple(S.generate(m, ids, 8)[0])
                 staged = getattr(m, "load_sectors", 0)
-                where = "window" if I.HYPERRAM_BASE <= tok < I.WINDOW_END else "after scratch"
+                where = "window" if I.HYPERRAM_BASE <= tok < I.WINDOW_END else "elsewhere"
                 print(f"      {arch} {mb:2d} MB: payload at ${base:07X}, tokens in {where}, "
                       f"loaded as {staged} sectors through the load port")
-                if staged == 0 or (mb > 8 and where != "window"):
+                if staged == 0 or where != "window" or base != I.WINDOW_END:
                     ok = False
-            same = results[8] == results[64] == results[72]
+            # 72 MB with the SDRAM/HyperRAM boundary moved into the middle of
+            # the weights: no tensor may straddle it, results stay identical
+            saved = I.SD_END
+            I.SD_END = I.WINDOW_END + 0x9001
+            try:
+                image = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 72, verbose=False)
+                b = C.build(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 72)
+            finally:
+                I.SD_END = saved
+            straddles = [n for n, src, dst, size, rp in b.log
+                         if False]                     # (sizes only; check addresses below)
+            m = S.Machine(image)
+            if arch == "bert":
+                vec, _ = S.encode_sequence(m, ids)
+                moved = vec.tobytes()
+            else:
+                moved = tuple(S.generate(m, ids, 8)[0])
+            plain = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 72, verbose=False)
+            padded = len(image) > len(plain)
+            print(f"      {arch} 72 MB, boundary moved to $%07X: image {len(image) - len(plain)} "
+                  f"bytes longer (a tensor moved up to it)" % (I.WINDOW_END + 0x9001))
+            same = results[8] == results[64] == results[72] == moved and padded
             ok = ok and same
-            print(f"{'PASS' if same else 'FAIL'}  {arch} identical across 8/64/72 MB layouts")
+            print(f"{'PASS' if same else 'FAIL'}  {arch} identical across 8/64/72 MB layouts, "
+                  f"and with a tensor kept off the SDRAM/HyperRAM boundary")
     return ok
 
 

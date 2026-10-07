@@ -50,7 +50,7 @@ TOKENS       ?= 120
 # TEMP: leave unset for the chat defaults (sampling); 0 = greedy, as the hardware
 CHAT_OPTS     = -n $(TOKENS) $(if $(TEMP),$(if $(filter 0 0.0,$(TEMP)),--greedy,--temp $(TEMP))) $(if $(HW),--hw)
 
-CONVERT_OPTS  = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(ATTICRAM)
+CONVERT_OPTS  = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(ATTICRAM) $(if $(TYPE),--type "$(TYPE)")
 CONVERT_OPTS += $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW))
 
 .PHONY: test clean findmodels fetch %.all %.chat %.run %.tokcheck
@@ -59,7 +59,7 @@ CONVERT_OPTS += $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW))
 %.ssnail: %.gguf $(TOOL_DEPS)
 	$(CONVERT) convert $< -o $@ $(CONVERT_OPTS)
 
-SIZED_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW))
+SIZED_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW)) $(if $(TYPE),--type "$(TYPE)")
 
 %.8mb.ssnail: %.gguf $(TOOL_DEPS)
 	$(CONVERT) convert $< -o $@ $(SIZED_OPTS) --mem-mb 8
@@ -101,6 +101,7 @@ test:
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_hw.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_pipeline.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_gpt2_bert.py
+	$(PYTHON) $(SSNAIL_TOOLS)tests/test_desc.py
 
 clean:
 	rm -f *.ssnail

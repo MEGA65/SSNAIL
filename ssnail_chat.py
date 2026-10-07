@@ -174,6 +174,8 @@ def main():
     m.rng = np.random.default_rng(args.seed)
     tok = Tokenizer(m)
     encoder = bool(struct.unpack("<H", m.mem[6:8])[0] & I.H_FLAG_ENCODER)
+    if S.description(m):
+        print(f"[{S.description(m)}]")
     print(f"[{tok.arch} {'encoder' if encoder else 'decoder'}, context "
           f"{S.header(m, I.H_MAXCTX)}, vocab {S.header(m, I.H_NVOCAB)}]")
     if not encoder:

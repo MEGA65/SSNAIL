@@ -79,28 +79,32 @@ NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_Q4_0, FMT_Q8_0, FMT_BF16}
 
 # --- Image layout ---------------------------------------------------------------
 HYPERRAM_BASE = 0x8000000
-# Images larger than 8 MB use the R4-R6 map: attic RAM at $8000000, SDRAM at
-# $8800000 (SSNAIL SDRAM base $88, size 64).  The CPU only ever sees
-# attic RAM, so the first 64 KB of attic RAM is a "host window" the CPU and
-# SSNAIL share: header, runtime block, token buffer, output vector, and a
-# staging buffer through which SSNAIL copies the rest of the image into SDRAM
-# (and back out, to verify).
-#    8 MB  everything in attic RAM (all boards)
-#   64 MB  host window in attic RAM; the model entirely in SDRAM, leaving
-#          $8010000-$87FFFFF of attic RAM free for other software
-#   72 MB  host window, then the model from $8010000 through attic RAM and on
-#          into SDRAM
-MEM_CONFIGS = {8: "attic RAM", 64: "SDRAM, 64 KB attic RAM host window",
-               72: "attic RAM + SDRAM"}
-WINDOW_END = HYPERRAM_BASE + 0x10000
-LOADER_JOB = HYPERRAM_BASE + 0x80      # 4 instructions, used by the loader
+# SSNAIL's address map (its region registers default to these):
+#   R3 (no SDRAM)   $8000000-$87FFFFF  HyperRAM
+#   R4-R6           $8000000-$BFFFFFF  SDRAM (the faster memory, first)
+#                   $C000000-$C7FFFFF  HyperRAM
+# Every image uses one layout from $8000000, so an image of 8 MB or less is
+# identical on every board.  The CPU reads the window and tables by mapping
+# whichever RAM is at $8000000 (SDRAM when SSNAIL reports it present), and
+# writes through SSNAIL's load port.
+#
+#   $8000000  header + runtime block (256 bytes)
+#   $8000080  model description (header bytes $80-$FF, see H_DESC)
+#   $8000100  output vector (BERT embedding), up to 3840 bytes
+#   $8001000  token buffer, 16 KB (up to 4095 tokens of context)
+#   $8005000  script, vocab and tokenizer tables, weights, then scratch
+#
+# Sizes: 8 MB (any board), 64 MB (R4-R6, all SDRAM), 72 MB (R4-R6, spilling
+# into HyperRAM at $C000000; no weight tensor straddles $C000000, since GEMV
+# streams each matrix from one RAM).
+MEM_CONFIGS = {8: "any board", 64: "R4-R6, all in SDRAM",
+               72: "R4-R6, SDRAM then HyperRAM at $C000000"}
+WINDOW_END = HYPERRAM_BASE + 0x5000
 OUTPUT_AREA = HYPERRAM_BASE + 0x100    # up to 3840 bytes (960 floats)
 OUTPUT_AREA_SIZE = 0xF00
 TOKENS_AREA = HYPERRAM_BASE + 0x1000   # 16 KB: up to 4096 tokens
 TOKENS_AREA_SIZE = 0x4000
-STAGING_AREA = HYPERRAM_BASE + 0x5000  # 44 KB staging buffer
-STAGING_SIZE = 0xB000
-SDRAM_BASE = HYPERRAM_BASE + 0x800000
+SD_END = HYPERRAM_BASE + 64 * 0x100000 # end of SDRAM on R4-R6 ($C000000)
 MEM_TOP = HYPERRAM_BASE + 72 * 0x100000
 HEADER_SIZE = 0x100
 MAGIC = b"SSNL"
@@ -128,12 +132,14 @@ H_MEM_NEEDED = 0x38  # bytes of linear memory the image needs from $8000000,
                      #   including scratch, KV cache and a full token buffer
 H_FLAG_ENCODER = 0x0001   # in the u16 flags: encoder (BERT) image
 
-H_MEMCFG = 0x60      # bytes: SSNAIL HyperRAM MB, SDRAM base MB, SDRAM MB, 0
+H_MEMCFG = 0x60      # (unused: 0; SSNAIL's default region registers are right)
 H_LOAD_BASE = 0x64   # where the payload loads
-H_STAGING = 0x68     # staging buffer for SSNAIL-assisted loading (0 = none)
+H_STAGING = 0x68     # (unused: 0)
 H_STAGING_SIZE = 0x6C
-H_HOST_BASE = 0x70   # host segment: tables the CPU needs (vocab, tokenizer),
-H_HOST_LEN = 0x74    #   loaded into attic RAM; length 0 = they are in the payload
+H_DESC = 0x80        # description, NUL-terminated UTF-8: "name (arch) [type]",
+H_DESC_SIZE = 0x80   #   type from convert --type (default General), up to $FF
+H_HOST_BASE = 0x70   # (unused: 0)
+H_HOST_LEN = 0x74    # (unused: 0)
 H_TOKENIZER = 0x78   # address of the tokenizer block
 
 # Tokenizer block (everything the MEGA65 needs to turn ASCII text into tokens;
