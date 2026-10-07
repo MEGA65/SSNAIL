@@ -34,6 +34,10 @@ rng = np.random.default_rng(7)
 x = (rng.standard_normal(32 * 64) * rng.choice([0.01, 1, 50], 32 * 64)).astype(F32)
 x[:32] = 0                                    # an all-zero block
 x[32:64] = np.arange(32, dtype=F32) * 0.5     # exact .5 cases
+# a block where x * id lands just below .5: 0.49999997 + 0.5 rounds up in F32
+x[64:96] = F32(0)
+x[64] = F32(127.0)
+x[65] = np.nextafter(F32(0.5), F32(0))
 d, q = H.quantize_q8_0(x)
 mine = np.concatenate([np.concatenate([d[i:i + 1].view(np.uint8), q[i].view(np.uint8)])
                        for i in range(len(d))])

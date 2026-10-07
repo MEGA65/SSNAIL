@@ -27,8 +27,10 @@ def recip(x):
 
 
 def rsqrt(x):
-    """1/sqrt(x), correctly rounded (hardware: within 1 ulp)."""
-    return F32(1.0 / np.sqrt(float(x)))
+    """1 / sqrt(x) as two correctly rounded steps: F32(1 / F32(sqrt(x))).
+    (Within 1 ulp of an exactly rounded rsqrt; matches the hardware, which
+    has a square root and a divider, bit for bit.)"""
+    return recip(np.sqrt(F32(x), dtype=F32))
 
 
 # --- Q8_0 quantisation of the GEMV input, as llama.cpp quantize_row_q8_0 ------
@@ -42,8 +44,17 @@ def quantize_q8_0(x):
     with np.errstate(divide="ignore"):
         idv = np.where(d != 0, F32(1) / np.where(d != 0, d, F32(1)), F32(0)).astype(F32)
     xi = (x * idv[:, None]).astype(F32)
-    q = np.sign(xi) * np.floor(np.abs(xi) + F32(0.5))          # roundf
-    return d.astype(np.float16), q.astype(np.int8)
+    return d.astype(np.float16), roundf(xi).astype(np.int8)
+
+
+def roundf(v):
+    """C roundf (half away from zero), exactly.  Not floor(|v| + 0.5) in
+    F32: that addition can round (0.49999997 + 0.5 -> 1.0).  Every step here
+    is exact in F32, as in gguf-py."""
+    v = np.asarray(v, dtype=F32)
+    a = np.abs(v)
+    fl = np.floor(a)
+    return (np.sign(v) * (fl + np.floor(F32(2) * (a - fl)))).astype(F32)
 
 
 # --- GEMV ----------------------------------------------------------------------
