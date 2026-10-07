@@ -22,6 +22,7 @@ from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
 from gguf.quants import dequantize
 
 import ssnail_isa as I
+import ssnail_hw as H
 
 
 def row_bytes(fmt, n):
@@ -59,6 +60,9 @@ class Machine:
         self.temperature, self.top_k = 0.0, 0
         self.rep_penalty, self.rep_window = 1.0, 64
         self.rng = np.random.default_rng()
+        # Hardware-numerics mode: compute exactly as the SSNAIL datapath
+        # (ssnail_hw.py).  Off: float reference.
+        self.hw = False
         load_image(self, image)
         self.stats = dict(instructions=0, bytes_read=0, bytes_written=0)
 
@@ -153,11 +157,23 @@ class Machine:
                         or (op == I.BLT and ra < rb):
                     npc = self.ea(x)
             elif op == I.GEMV:
-                W = self.weights(a, self.ea(x), N1, N0)
-                v = W @ self.f32v(self.ea(y), N0)
+                xv = self.f32v(self.ea(y), N0)
+                if self.hw and a in (I.FMT_Q8_0, I.FMT_Q4_0):
+                    raw = self.read(self.ea(x), N1 * row_bytes(a, N0))
+                    v = H.gemv_quant(raw, a, N1, N0, xv)
+                elif self.hw:
+                    v = H.gemv_float(self.weights(a, self.ea(x), N1, N0), xv)
+                else:
+                    v = (self.weights(a, self.ea(x), N1, N0) @ xv).astype(np.float32)
                 if b & I.GEMV_ACC:
-                    v = v + self.f32v(self.ea(z), N1)
-                self.put_f32v(self.ea(z), v)
+                    v = (v + self.f32v(self.ea(z), N1)).astype(np.float32)
+                if b & I.GEMV_F16OUT:
+                    self.write(self.ea(z), np.asarray(v, dtype="<f2").tobytes())
+                else:
+                    self.put_f32v(self.ea(z), v)
+            elif op == I.CVT16:
+                v = self.f32v(self.ea(x), N0)
+                self.write(self.ea(z), v.astype("<f2").tobytes())
             elif op == I.DEQROW:
                 self.put_f32v(self.ea(z), self.weights(a, self.ea(x), 1, N0)[0])
             elif op == I.ARGMAX:
@@ -171,13 +187,18 @@ class Machine:
                     r = p + q
                 elif op == I.VMUL:
                     r = p * q
+                elif self.hw:
+                    r = H.silumul(p, q)
                 else:
                     r = p / (1.0 + np.exp(-p)) * q
                 self.put_f32v(self.ea(z), r)
             elif op == I.RMSNORM:
                 eps = struct.unpack("<f", struct.pack("<I", N2))[0]
                 p, g = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
-                r = p / np.sqrt(np.mean(p.astype(np.float64) ** 2) + eps) * g
+                if self.hw:
+                    r = H.rmsnorm(p, g, eps)
+                else:
+                    r = p / np.sqrt(np.mean(p.astype(np.float64) ** 2) + eps) * g
                 self.put_f32v(self.ea(z), r)
             elif op == I.ROPE:
                 vaddr = self.ea(x)
@@ -193,18 +214,21 @@ class Machine:
                 self.attn(self.ea(x), self.ea(y), self.ea(z), self.reg(a))
             elif op == I.LAYERNORM:
                 eps = struct.unpack("<f", struct.pack("<I", N2))[0]
-                p = self.f32v(self.ea(x), N0).astype(np.float64)
                 gb = self.f32v(self.ea(y), 2 * N0)
-                p = p - p.mean()
-                r = p / np.sqrt(np.mean(p * p) + eps) * gb[:N0] + gb[N0:]
+                if self.hw:
+                    r = H.layernorm(self.f32v(self.ea(x), N0), gb[:N0], gb[N0:], eps)
+                else:
+                    p = self.f32v(self.ea(x), N0).astype(np.float64)
+                    p = p - p.mean()
+                    r = p / np.sqrt(np.mean(p * p) + eps) * gb[:N0] + gb[N0:]
                 self.put_f32v(self.ea(z), r)
             elif op == I.GELU:
                 p = self.f32v(self.ea(x), N0)
-                self.put_f32v(self.ea(z), gelu(p))
+                self.put_f32v(self.ea(z), H.gelu(p) if self.hw else gelu(p))
             elif op == I.MEANROWS:
                 rows = self.reg(a)
                 M = self.f32v(self.ea(x), rows * N0).reshape(rows, N0)
-                self.put_f32v(self.ea(z), M.mean(axis=0))
+                self.put_f32v(self.ea(z), H.meanrows(M) if self.hw else M.mean(axis=0))
             else:
                 raise SsnailError(f"illegal opcode ${op:02X} at PC ${self.pc:07X}")
             self.pc = npc
@@ -233,15 +257,25 @@ class Machine:
         p = np.exp(z - z.max())
         return int(self.rng.choice(len(p), p=p / p.sum()))
 
+    def kv(self, addr, n, fmt):
+        if fmt == I.KV_F16:
+            return np.frombuffer(self.read(addr, 2 * n), dtype="<f2").astype(np.float32)
+        return self.f32v(addr, n)
+
     def attn(self, block, q_a, out_a, pos):
-        k_a, v_a, nh, nkv, hd, _r0, _r1, _r2 = struct.unpack(
+        k_a, v_a, nh, nkv, hd, kvf, _r1, _r2 = struct.unpack(
             "<8I", self.read(block, 32))
         kvd = nkv * hd
         q = self.f32v(q_a, nh * hd).reshape(nh, hd)
-        K = self.f32v(k_a, (pos + 1) * kvd).reshape(pos + 1, nkv, hd)
-        V = self.f32v(v_a, (pos + 1) * kvd).reshape(pos + 1, nkv, hd)
+        K = self.kv(k_a, (pos + 1) * kvd, kvf).reshape(pos + 1, nkv, hd)
+        V = self.kv(v_a, (pos + 1) * kvd, kvf).reshape(pos + 1, nkv, hd)
         out = np.empty((nh, hd), dtype=np.float32)
         group = nh // nkv
+        if self.hw:
+            for h in range(nh):
+                out[h] = H.attention_head(q[h], K[:, h // group, :], V[:, h // group, :])
+            self.put_f32v(out_a, out.reshape(-1))
+            return
         for h in range(nh):
             s = K[:, h // group, :] @ q[h] / np.sqrt(hd)
             s = np.exp(s - s.max())

@@ -98,8 +98,11 @@ script publishes it (at SYNC), keeping the context between turns.
   When the context fills, `/reset`.
 - Encoders (BERT): each line is embedded and the three most similar earlier
   lines are shown with their cosine similarity.
-- `/n N`, `/temp T`, `/topk K`, `/penalty P`, `/greedy`, `/seed S`, `/stats`,
-  `/reset`, `/quit`.
+- `/n N`, `/temp T`, `/topk K`, `/penalty P`, `/greedy`, `/hw`, `/eos`,
+  `/seed S`, `/stats`, `/reset`, `/quit`.
+- `/eos` (or `--eos`) shows `<EOS n%>` wherever the sampler gives the
+  end-of-text token 5% or more: useful for seeing whether a model ends its
+  stories, or runs straight on into the next one.
 
 Tokenization uses only the image (see "Tokenizer in the image"), so no GGUF is
 needed.  Token ids are model-specific, so
@@ -223,7 +226,13 @@ a given sustained bandwidth (default 130 MB/s).
 - Prompt tokenization: SentencePiece (`llama`), byte-level BPE (`gpt2`) and
   WordPiece (`bert`, uncased).  The GPT-2 pre-tokenizer is exact for English
   text; unusual Unicode may split differently from the reference.
-- Activations, KV cache, norm weights and the RoPE table are float32 in v1.
+- KV caches are F16 by default (`--kv f32` for exact reference runs); see
+  `ssnail-numerics.md`.  The emulator has two numerics modes: the float
+  reference, and **hardware numerics** (`Machine.hw = True`, `ssnail_chat.py
+  --hw`, `make foo.chat HW=1`), defined bit by bit in `ssnail_hw.py`, which
+  the VHDL is checked against.  On the test models, hardware numerics change
+  logits by about 1% and never change the greedy choice.
+- Activations, norm weights and the RoPE table are float32.
   This defines the reference semantics; the hardware will use narrower
   fixed-point formats and be checked against the emulator within a tolerance.
   The float32 KV cache is the main memory cost: 8 bytes × layers × ctx ×
@@ -346,6 +355,10 @@ N0–N2 (lengths, set by SETN).
 | $26 | LAYERNORM | Z = (X − mean) · rsqrt(var + eps) · G + B; G at addr(Y), B immediately after it; eps = N2 |
 | $27 | GELU | Z = gelu(X), tanh approximation (as ggml) |
 | $28 | MEANROWS | Z = mean of R[a] consecutive N0-element f32 rows starting at addr(X) |
+| $29 | CVT16 | Z (N0 × F16) = X (N0 × F32), round to nearest even (storing K/V rows in an F16 cache) |
+
+GEMV flag `b` bit 1 writes y as F16 instead of F32.  The ATTN parameter
+block's sixth word is the KV cache format: 0 F32, 1 F16.
 
 Notes for the hardware:
 

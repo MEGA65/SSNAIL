@@ -361,8 +361,11 @@ def rowbytes(fmt, n):
 
 
 class Builder:
-    def __init__(self, m, p, ctx, policy, fallback, mem_mb):
+    def __init__(self, m, p, ctx, policy, fallback, mem_mb, kv="f16"):
         self.m, self.p, self.ctx = m, p, ctx
+        self.kv16 = kv == "f16"
+        self.kv_esz = 2 if self.kv16 else 4
+        self.kv_fmt = I.KV_F16 if self.kv16 else I.KV_F32
         self.policy, self.fallback = policy, fallback
         self.mem_mb = mem_mb
         self.big = mem_mb > 8
@@ -706,12 +709,15 @@ def build_llama(b):
     blocks = [b.add(bytes(32)) for _ in L]
     b.end_of_file()
     x, xb, q, att = (b.salloc(4 * dim) for _ in range(4))
+    kscr = b.salloc(4 * kvd)
     hb, hb2 = b.salloc(4 * hidden), b.salloc(4 * hidden)
     logits = b.salloc(4 * vocab)
-    kc = [b.salloc(4 * ctx * kvd) for _ in L]
-    vc = [b.salloc(4 * ctx * kvd) for _ in L]
+    esz = b.kv_esz
+    kc = [b.salloc(esz * ctx * kvd) for _ in L]
+    vc = [b.salloc(esz * ctx * kvd) for _ in L]
     for l, blk in enumerate(blocks):
-        b.patch(blk, struct.pack("<8I", kc[l], vc[l], p["n_heads"], p["n_kv_heads"], hd, 0, 0, 0))
+        b.patch(blk, struct.pack("<8I", kc[l], vc[l], p["n_heads"], p["n_kv_heads"], hd,
+                                 b.kv_fmt, 0, 0))
     tokens_addr = b.tokens()
     eps = I.f32_bits(p["eps"])
 
@@ -728,14 +734,23 @@ def build_llama(b):
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, W["wq"][0], x=W["wq"][1], y=xb, z=q)
         A(I.SETN, x=dim, y=kvd)
-        A(I.LEA, 3, R_POS, kc[l], z=4 * kvd)
-        A(I.GEMV, W["wk"][0], x=W["wk"][1], y=xb, z=a_[3])
-        A(I.LEA, 4, R_POS, vc[l], z=4 * kvd)
-        A(I.GEMV, W["wv"][0], x=W["wv"][1], y=xb, z=a_[4])
+        A(I.LEA, 3, R_POS, kc[l], z=esz * kvd)
+        A(I.LEA, 4, R_POS, vc[l], z=esz * kvd)
+        if b.kv16:
+            # K is rotated in F32, then stored as F16; V goes straight in
+            A(I.GEMV, W["wk"][0], x=W["wk"][1], y=xb, z=kscr)
+            A(I.GEMV, W["wv"][0], I.GEMV_F16OUT, x=W["wv"][1], y=xb, z=a_[4])
+        else:
+            A(I.GEMV, W["wk"][0], x=W["wk"][1], y=xb, z=a_[3])
+            A(I.GEMV, W["wv"][0], x=W["wv"][1], y=xb, z=a_[4])
         A(I.SETN, x=dim, y=hd)
         A(I.ROPE, x=q, y=a_[2])
         A(I.SETN, x=kvd, y=hd)
-        A(I.ROPE, x=a_[3], y=a_[2])
+        if b.kv16:
+            A(I.ROPE, x=kscr, y=a_[2])
+            A(I.CVT16, x=kscr, z=a_[3])
+        else:
+            A(I.ROPE, x=a_[3], y=a_[2])
         A(I.ATTN, R_POS, x=blocks[l], y=q, z=att)
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, W["wo"][0], I.GEMV_ACC, x=W["wo"][1], y=att, z=x)
@@ -778,14 +793,15 @@ def build_gpt2(b):
     cls = b.wt("output.weight") if m.has("output.weight") else wte
     blocks = [b.add(bytes(32)) for _ in L]
     b.end_of_file()
-    x, xb, q, att, tmp = (b.salloc(4 * dim) for _ in range(5))
+    x, xb, q, att, tmp, kscr, vscr = (b.salloc(4 * dim) for _ in range(7))
     hb = b.salloc(4 * hidden)
     logits = b.salloc(4 * vocab)
-    kc = [b.salloc(4 * ctx * dim) for _ in L]
-    vc = [b.salloc(4 * ctx * dim) for _ in L]
+    esz = b.kv_esz
+    kc = [b.salloc(esz * ctx * dim) for _ in L]
+    vc = [b.salloc(esz * ctx * dim) for _ in L]
     for l, blk in enumerate(blocks):
         b.patch(blk, struct.pack("<8I", kc[l], vc[l], p["n_heads"], p["n_heads"],
-                                       p["head_dim"], 0, 0, 0))
+                                 p["head_dim"], b.kv_fmt, 0, 0))
     tokens_addr = b.tokens()
     eps = I.f32_bits(p["eps"])
     eos = m.field("tokenizer.ggml.eos_token_id", 50256)
@@ -805,14 +821,18 @@ def build_gpt2(b):
         A(I.LAYERNORM, x=x, y=W["ln1"], z=xb)
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, wf, x=wa, y=xb, z=q)                          # rows 0..dim-1
-        A(I.LEA, 3, R_POS, kc[l], z=4 * dim)
-        A(I.GEMV, wf, x=wa + dim * wrb, y=xb, z=a_[3])          # rows dim..2dim-1
-        A(I.LEA, 4, R_POS, vc[l], z=4 * dim)
-        A(I.GEMV, wf, x=wa + 2 * dim * wrb, y=xb, z=a_[4])      # rows 2dim..3dim-1
+        A(I.LEA, 3, R_POS, kc[l], z=esz * dim)
+        A(I.LEA, 4, R_POS, vc[l], z=esz * dim)
+        kd, vd = (kscr, vscr) if b.kv16 else (a_[3], a_[4])
+        A(I.GEMV, wf, x=wa + dim * wrb, y=xb, z=kd)             # rows dim..2dim-1
+        A(I.GEMV, wf, x=wa + 2 * dim * wrb, y=xb, z=vd)         # rows 2dim..3dim-1
         A(I.SETN, x=dim)
         A(I.VADD, x=q, y=W["bqkv"], z=q)
-        A(I.VADD, x=a_[3], y=W["bqkv"] + 4 * dim, z=a_[3])
-        A(I.VADD, x=a_[4], y=W["bqkv"] + 8 * dim, z=a_[4])
+        A(I.VADD, x=kd, y=W["bqkv"] + 4 * dim, z=kd)
+        A(I.VADD, x=vd, y=W["bqkv"] + 8 * dim, z=vd)
+        if b.kv16:
+            A(I.CVT16, x=kscr, z=a_[3])
+            A(I.CVT16, x=vscr, z=a_[4])
         A(I.ATTN, R_POS, x=blocks[l], y=q, z=att)
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, W["wo"][0], I.GEMV_ACC, x=W["wo"][1], y=att, z=x)
@@ -864,13 +884,16 @@ def build_bert(b):
     b.end_of_file()
     X = b.salloc(4 * ctx * dim)          # activations, one row per token
     Q = b.salloc(4 * ctx * dim)
-    K = b.salloc(4 * ctx * dim)
-    V = b.salloc(4 * ctx * dim)
+    esz = b.kv_esz
+    K = b.salloc(esz * ctx * dim)
+    V = b.salloc(esz * ctx * dim)
     att, tmp = b.salloc(4 * dim), b.salloc(4 * dim)
+    kscr, vscr = b.salloc(4 * dim), b.salloc(4 * dim)
     out = b.output_buffer(4 * dim)
     hb = b.salloc(4 * hidden)
     for blk in blocks:
-        b.patch(blk, struct.pack("<8I", K, V, p["n_heads"], p["n_heads"], p["head_dim"], 0, 0, 0))
+        b.patch(blk, struct.pack("<8I", K, V, p["n_heads"], p["n_heads"], p["head_dim"],
+                                 b.kv_fmt, 0, 0))
     tokens_addr = b.tokens()
     eps = I.f32_bits(p["eps"])
     row = 4 * dim
@@ -911,15 +934,19 @@ def build_bert(b):
         A.label(f"qkv{l}")
         A(I.LEA, 6, R_T, X, z=row)
         A(I.LEA, 7, R_T, Q, z=row)
-        A(I.LEA, 3, R_T, K, z=row)
-        A(I.LEA, 4, R_T, V, z=row)
+        A(I.LEA, 3, R_T, K, z=esz * dim)
+        A(I.LEA, 4, R_T, V, z=esz * dim)
+        kd, vd = (kscr, vscr) if b.kv16 else (a_[3], a_[4])
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, W["wq"][0], x=W["wq"][1], y=a_[6], z=a_[7])
-        A(I.GEMV, W["wk"][0], x=W["wk"][1], y=a_[6], z=a_[3])
-        A(I.GEMV, W["wv"][0], x=W["wv"][1], y=a_[6], z=a_[4])
+        A(I.GEMV, W["wk"][0], x=W["wk"][1], y=a_[6], z=kd)
+        A(I.GEMV, W["wv"][0], x=W["wv"][1], y=a_[6], z=vd)
         A(I.VADD, x=a_[7], y=W["bq"], z=a_[7])
-        A(I.VADD, x=a_[3], y=W["bk"], z=a_[3])
-        A(I.VADD, x=a_[4], y=W["bv"], z=a_[4])
+        A(I.VADD, x=kd, y=W["bk"], z=kd)
+        A(I.VADD, x=vd, y=W["bv"], z=vd)
+        if b.kv16:
+            A(I.CVT16, x=kscr, z=a_[3])
+            A(I.CVT16, x=vscr, z=a_[4])
         A(I.ADDI, R_T, R_T, z=1)
         A(I.BLT, R_T, R_N, f"qkv{l}")
         # Pass 2: bidirectional attention, then the rest of the layer
@@ -961,13 +988,13 @@ def build_bert(b):
 BUILDERS = dict(llama=build_llama, gpt2=build_gpt2, bert=build_bert)
 
 
-def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None):
+def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16"):
     """confirm(message) -> bool is asked before 'auto' stores weights with
     fewer bits than an already-quantised source; None = never ask."""
     if policy == "auto":
         for pol, what in AUTO_ORDER:
             try:
-                b = build(m, ctx, pol, fallback, hyperram_mb)
+                b = build(m, ctx, pol, fallback, hyperram_mb, kv)
             except ImageTooBig:
                 continue
             if b.lossy and confirm is not None:
@@ -989,7 +1016,7 @@ def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None):
                 b.report(hyperram_mb)
             return b.image
         raise ImageTooBig(f"Does not fit in {hyperram_mb:g} MB even with Q4_0 weights")
-    b = build(m, ctx, policy, fallback, hyperram_mb)
+    b = build(m, ctx, policy, fallback, hyperram_mb, kv)
     if verbose:
         b.report(hyperram_mb)
         if b.lossy:
@@ -997,11 +1024,11 @@ def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None):
     return b.image
 
 
-def build(m, ctx, policy, fallback, hyperram_mb):
+def build(m, ctx, policy, fallback, hyperram_mb, kv="f16"):
     p = params(m)
     if ctx is None:
         ctx = min(p["ctx_train"], 256 if m.arch != "bert" else 128)
-    b = Builder(m, p, ctx, policy, fallback, hyperram_mb)
+    b = Builder(m, p, ctx, policy, fallback, hyperram_mb, kv)
     output, outdim, flags = BUILDERS[m.arch](b)
     b.image = b.finish(output, outdim, flags, hyperram_mb, verbose=False)
     return b
@@ -1032,6 +1059,8 @@ def main():
                    help="weight format: keep native formats; force one; 'mixed' (Q8_0 layers, "
                         "Q4_0 embedding/classifier); or 'auto' (best that fits: keep, q8_0, "
                         "mixed, q4_0; asks before going below the file's own precision)")
+    c.add_argument("--kv", default="f16", choices=["f16", "f32"],
+                   help="KV cache format (default f16; f32 for exact reference runs)")
     c.add_argument("--fallback", default="q8_0", choices=list(FMT_BY_NAME),
                    help="format for weights not natively supported (with --wtype keep)")
     c.add_argument("--mem-mb", "--hyperram-mb", dest="hyperram_mb", type=float, default=8,
@@ -1049,7 +1078,7 @@ def main():
     if args.cmd == "convert":
         try:
             image = convert(m, args.ctx, args.wtype, FMT_BY_NAME[args.fallback], args.hyperram_mb,
-                            confirm=ask)
+                            confirm=ask, kv=args.kv)
         except ImageTooBig:
             raise SystemExit(too_big_message(m, args.gguf, args.hyperram_mb, args.ctx is not None))
         open(args.output, "wb").write(image)

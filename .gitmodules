@@ -1,0 +1,3 @@
+[submodule "mega65-libc"]
+	path = mega65-libc
+	url = ssh://git@github.com/mega65/mega65-libc

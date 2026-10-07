@@ -18,7 +18,7 @@ It drives the image the way MEGA65 software would: it writes tokens and the
 runtime block, starts the script, and prints tokens as the script publishes
 them (at each SYNC).
 
-Commands:  /reset  /n N  /temp T  /topk K  /penalty P  /greedy  /seed S  /stats  /quit
+Commands:  /reset  /n N  /temp T  /topk K  /penalty P  /greedy  /hw  /eos  /seed S  /stats  /quit
 """
 
 import argparse
@@ -68,9 +68,29 @@ def read_token(m, i):
     return struct.unpack("<I", m.mem[o:o + 4])[0]
 
 
+def eos_probability(m, logits):
+    """Probability the sampler gives the end-of-text token (after temperature
+    and top-k, as Machine.choose does; repetition penalty ignored)."""
+    eos = S.header(m, I.H_EOS)
+    if eos >= len(logits):
+        return 0.0
+    z = np.asarray(logits, dtype=np.float64)
+    if m.temperature <= 0:
+        return 1.0 if int(np.argmax(z)) == eos else 0.0
+    z = z / m.temperature
+    if 0 < m.top_k < len(z):
+        cut = np.partition(z, -m.top_k)[-m.top_k]
+        if z[eos] < cut:
+            return 0.0
+        z = np.where(z >= cut, z, -np.inf)
+    p = np.exp(z - z.max())
+    return float(p[eos] / p.sum())
+
+
 class Session:
     def __init__(self, m, tok, n):
         self.m, self.tok, self.n = m, tok, n
+        self.show_eos = False
         self.started = False
         self.shown = 0
 
@@ -106,7 +126,16 @@ class Session:
                 sys.stdout.flush()
                 self.shown += 1
 
+        def on_argmax(logits):
+            # Only while generating, not during the prompt
+            if self.show_eos and S.header(m, I.R_POS) + 1 >= plen:
+                p = eos_probability(m, logits)
+                if p >= 0.05:
+                    sys.stdout.write(f"<EOS {100 * p:.0f}%>")
+                    sys.stdout.flush()
+
         m.on_sync = on_sync
+        m.on_argmax = on_argmax
         m.run(S.header(m, I.H_CODE))
         reason = S.header(m, I.R_STOP_REASON)
         print()
@@ -121,6 +150,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image")
     ap.add_argument("-n", type=int, default=120, help="tokens per turn (default 120)")
+    ap.add_argument("--hw", action="store_true",
+                    help="hardware numerics (Q8_0 GEMV inputs, function tables, ...) "
+                         "instead of the float reference")
     ap.add_argument("--greedy", action="store_true",
                     help="greedy decoding, exactly as the v1 hardware")
     ap.add_argument("--penalty", type=float, default=1.15,
@@ -129,12 +161,15 @@ def main():
                     help="sampling temperature (0 = greedy, as the v1 hardware)")
     ap.add_argument("--topk", type=int, default=40)
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--eos", action="store_true",
+                    help="show the end-of-text probability (<EOS n%%>) when it is 5%% or more")
     ap.add_argument("--prompt", help="run one prompt non-interactively and exit")
     args = ap.parse_args()
 
     m = S.Machine(open(args.image, "rb").read())
     m.temperature = 0.0 if args.greedy else args.temp
     m.top_k = args.topk
+    m.hw = args.hw
     m.rep_penalty = 1.0 if args.greedy else args.penalty
     m.rng = np.random.default_rng(args.seed)
     tok = Tokenizer(m)
@@ -142,10 +177,12 @@ def main():
     print(f"[{tok.arch} {'encoder' if encoder else 'decoder'}, context "
           f"{S.header(m, I.H_MAXCTX)}, vocab {S.header(m, I.H_NVOCAB)}]")
     if not encoder:
-        print("[" + ("greedy, as the v1 hardware" if m.temperature <= 0 else
+        print("[" + ("hardware numerics" if m.hw else "float reference numerics") + "; "
+              + ("greedy, as the v1 hardware" if m.temperature <= 0 else
                      f"sampling: temperature {m.temperature}, top-k {m.top_k}, "
                      f"repetition penalty {m.rep_penalty}") + "]")
     sess = Session(m, tok, args.n)
+    sess.show_eos = args.eos
     seen = []
 
     def handle(line):
@@ -191,6 +228,13 @@ def main():
                 m.temperature = float(arg)
             elif c == "/topk" and arg:
                 m.top_k = int(arg)
+            elif c == "/eos":
+                sess.show_eos = not sess.show_eos
+                print(f"[end-of-text probability display {'on' if sess.show_eos else 'off'}: "
+                      f"shown as <EOS n%> when the sampler gives it 5% or more]")
+            elif c == "/hw":
+                m.hw = not m.hw
+                print(f"[{'hardware' if m.hw else 'float reference'} numerics]")
             elif c == "/penalty" and arg:
                 m.rep_penalty = float(arg)
             elif c == "/greedy":

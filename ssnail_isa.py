@@ -57,15 +57,17 @@ LAYERNORM = 0x26  # Z = (X - mean) * rsqrt(var + eps(N2)) * G + B;
                   #   G at addr(Y), B at addr(Y) + 4*N0
 GELU = 0x27     # Z = gelu(X) (tanh approximation, as ggml)
 MEANROWS = 0x28 # Z = mean of R[a] rows of N0 f32 starting at addr(X)
+CVT16 = 0x29    # Z (N0 x F16) = X (N0 x F32), round to nearest even
 
 OPNAMES = {v: k for k, v in dict(
     NOP=NOP, HALT=HALT, SYNC=SYNC, COPY=COPY, SETN=SETN, LI=LI, LDR=LDR,
     STR=STR, ADDI=ADDI, LEA=LEA, BEQ=BEQ, BNE=BNE, BLT=BLT, GEMV=GEMV,
     DEQROW=DEQROW, ARGMAX=ARGMAX, VADD=VADD, VMUL=VMUL, RMSNORM=RMSNORM,
     SILUMUL=SILUMUL, ROPE=ROPE, ATTN=ATTN, LAYERNORM=LAYERNORM, GELU=GELU,
-    MEANROWS=MEANROWS).items()}
+    MEANROWS=MEANROWS, CVT16=CVT16).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
+GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)
 
 RZERO = 15        # R15 reads as zero
 
@@ -170,8 +172,9 @@ R_STOP_REASON = 0x54  # 1 count reached, 2 EOS, 3 context full, 4 stop request
 
 STOP_COUNT, STOP_EOS, STOP_CTX_FULL, STOP_REQUESTED = 1, 2, 3, 4
 
-# ATTN parameter block: 8 x u32 (last three reserved, 0)
-ATTN_BLOCK_FIELDS = ("k_cache", "v_cache", "n_heads", "n_kv_heads", "head_dim")
+# ATTN parameter block: 8 x u32 (last two reserved, 0)
+ATTN_BLOCK_FIELDS = ("k_cache", "v_cache", "n_heads", "n_kv_heads", "head_dim", "kv_format")
+KV_F32, KV_F16 = 0, 1
 
 
 def reg_addr(areg, offset=0):

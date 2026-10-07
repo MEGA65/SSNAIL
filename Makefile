@@ -6,6 +6,7 @@
 #   make foo.run PROMPT="Once upon a time" TOKENS=60     # convert + emulate
 #   make foo.chat                        # interactive session on the emulator
 #   make foo.chat TEMP=0                 # greedy, exactly as the v1 hardware
+#   make foo.chat HW=1                   # hardware numerics instead of float
 #   make foo.info                        # architecture, tokenizer, tensors
 #   make foo.tokcheck                    # image tokenizer vs the GGUF's, on sample text
 #   make foo.all                         # foo.8mb.ssnail, foo.64mb.ssnail, foo.72mb.ssnail
@@ -47,7 +48,7 @@ ATTICRAM     ?= $(or $(HYPERRAM_MB),8)
 PROMPT       ?= Once upon a time
 TOKENS       ?= 120
 # TEMP: leave unset for the chat defaults (sampling); 0 = greedy, as the hardware
-CHAT_OPTS     = -n $(TOKENS) $(if $(TEMP),$(if $(filter 0 0.0,$(TEMP)),--greedy,--temp $(TEMP)))
+CHAT_OPTS     = -n $(TOKENS) $(if $(TEMP),$(if $(filter 0 0.0,$(TEMP)),--greedy,--temp $(TEMP))) $(if $(HW),--hw)
 
 CONVERT_OPTS  = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(ATTICRAM)
 CONVERT_OPTS += $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW))
@@ -97,6 +98,7 @@ test:
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_findmodels.py > /dev/null && echo "findmodels: ALL PASSED"
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_tokenizer.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_auto.py
+	$(PYTHON) $(SSNAIL_TOOLS)tests/test_hw.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_pipeline.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_gpt2_bert.py
 
