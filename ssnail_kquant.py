@@ -1,6 +1,6 @@
-"""Simple K-quant quantisers (Q4_K, Q6_K) for the tools.
+"""Simple quantisers (Q4_K, Q6_K, IQ4_NL) for the tools.
 
-gguf-py dequantises the K-quants but cannot make them.  These pack exactly
+gguf-py dequantises these formats but cannot make them.  These pack exactly
 the layouts gguf-py's dequantisers read (checked by round trip in
 tests/test_hw.py), with plain per-group scale choices rather than
 llama.cpp's error-minimising search: good enough for test models and for
@@ -82,9 +82,29 @@ def quantize_q4_k(x):
     return out.reshape(-1)
 
 
-QUANTISERS = {12: quantize_q4_k, 14: quantize_q6_k}
+IQ4_VALUES = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113],
+                      dtype=np.float32)
+
+
+def quantize_iq4_nl(x):
+    """x (F32, length a multiple of 32) -> IQ4_NL blocks (18 bytes each): F16
+    d = amax / 127, each weight the nearest of d * kvalues_iq4nl (low nibbles
+    are elements 0-15, high 16-31)."""
+    x = np.asarray(x, dtype=np.float32).reshape(-1, 32)
+    n = x.shape[0]
+    amax = np.abs(x).max(axis=1)
+    d = _f16(amax / 127).astype(np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v = np.where(d[:, None] > 0, x / d[:, None], 0)
+    idx = np.argmin(np.abs(v[:, :, None] - IQ4_VALUES[None, None, :]), axis=2)
+    qs = (idx[:, :16] | (idx[:, 16:] << 4)).astype(np.uint8)
+    return np.concatenate([_f16(d).reshape(n, 1).view(np.uint8), qs], axis=1).reshape(-1)
+
+
+QUANTISERS = {12: quantize_q4_k, 14: quantize_q6_k, 20: quantize_iq4_nl}
 
 
 def quantize_k(w, fmt):
-    """w (rows, cols), cols a multiple of 256 -> bytes, rows of fmt blocks"""
+    """w (rows, cols), cols a multiple of the block size -> bytes, rows of
+    fmt blocks"""
     return QUANTISERS[fmt](np.asarray(w, dtype=np.float32).reshape(-1)).tobytes()

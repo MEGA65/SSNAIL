@@ -20,8 +20,8 @@ so it gets a compact format.
 | Activation vectors (residual stream, q, attention output, FFN intermediates, logits) | **F32** | unchanged from ISA v1; small, so cost is negligible |
 | Norm gains/biases, RoPE table | **F32** | unchanged |
 | **KV cache** | **F16** | changed from F32: halves the largest activation structure and its per-token traffic |
-| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q4_0 and MXFP4 weights |
-| GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K weights |
+| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q4_0, IQ4_NL and MXFP4 weights |
+| GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K, IQ4_XS and TQ2_0 weights |
 
 ## Arithmetic
 
@@ -34,7 +34,11 @@ so it gets a compact format.
 - **GEMV, MXFP4 weights:** as Q4_0, with the E2M1 values doubled (ggml's
   kvalues) as the integers and d_w = ggml_e8m0_to_fp32_half(e), a power of
   two.
-- **GEMV, K-quant weights (Q2_K .. Q6_K; emulator only so far):** per
+- **GEMV, IQ4_NL weights:** as Q4_0, with the 4-bit indices mapped through
+  ggml's kvalues_iq4nl to the integers.
+- **GEMV, K-quant weights (Q2_K .. Q6_K, and IQ4_XS and TQ2_0 the same way:
+  IQ4_XS's 32-group scale less 32 with kvalues_iq4nl quants, TQ2_0 a scale of
+  1 and quants less 1):** per
   256-weight super-block, two exact integers: S1 = Σ over 16-weight groups g
   of sc[g]·(Σ q_w·q_x over g), and, for the formats with mins (Q2_K, Q4_K,
   Q5_K), S2 = Σ m[g]·(Σ q_x over g).  Then, each operation rounded:

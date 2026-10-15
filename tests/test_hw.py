@@ -11,7 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 from gguf import GGMLQuantizationType as Q  # noqa: E402
-from gguf.quants import quantize  # noqa: E402
+from gguf.quants import dequantize, quantize  # noqa: E402
 import ssnail_convert as C  # noqa: E402
 import ssnail_hw as H  # noqa: E402
 import ssnail_sim as S  # noqa: E402
@@ -70,10 +70,32 @@ for fmt, name in ((8, "Q8_0"), (2, "Q4_0")):
     report(np.array_equal(fast, np.array(slow, dtype=F32)),
            f"GEMV {name}: vectorised emulator == scalar definition (bit-exact)")
 
+# 2a. IQ4_NL (no gguf-py quantiser: random blocks with a sane d)
+rows, cols = 5, 96
+b = rng.integers(0, 256, (rows * cols // 32, 18), dtype=np.uint8)
+b[:, 0:2] = (rng.standard_normal((len(b), 1)) * 0.01).astype(np.float16).view(np.uint8)
+raw = b.tobytes()
+xv = rng.standard_normal(cols).astype(F32)
+fast = H.gemv_quant(raw, 20, rows, cols, xv)
+dx, qx = H.quantize_q8_0(xv)
+slow = []
+for r_ in range(rows):
+    acc = F32(0)
+    for blk in range(cols // 32):
+        o = (r_ * (cols // 32) + blk) * 18
+        dw = F32(np.frombuffer(raw[o:o + 2], dtype=np.float16)[0])
+        nib = np.frombuffer(raw[o + 2:o + 18], dtype=np.uint8).astype(int)
+        qw = np.concatenate([H.IQ4_VALUES[nib & 15], H.IQ4_VALUES[nib >> 4]])
+        acc = F32(acc + F32(F32(int(np.dot(qw, qx[blk].astype(int)))) * F32(dw * F32(dx[blk]))))
+    slow.append(acc)
+report(np.array_equal(fast, np.array(slow, dtype=F32)),
+       "GEMV IQ4_NL: vectorised emulator == scalar definition (bit-exact)")
+ref = dequantize(b.reshape(rows, -1), Q.IQ4_NL).reshape(rows, cols).astype(np.float64) @ xv
+report(np.max(np.abs(fast - ref)) / np.max(np.abs(ref)) < 0.03, "GEMV IQ4_NL: hw vs float")
+
 # 2b. K-quants: the parts are gguf-py's dequantisation, and the vectorised
 # GEMV equals a scalar reading of its definition (ssnail_hw.gemv_kquant)
-from gguf.quants import dequantize  # noqa: E402
-D_OFF = {10: [80, 82], 11: [108], 12: [0, 2], 13: [0, 2], 14: [208]}
+D_OFF = {10: [80, 82], 11: [108], 12: [0, 2], 13: [0, 2], 14: [208], 23: [0], 35: [64]}
 
 
 def k_random(fmt, n):
@@ -143,6 +165,7 @@ with tempfile.TemporaryDirectory() as d:
              ("llama F16", lambda p: TP.make_model(p, Q.F16)),
              ("llama Q4_K", lambda p: TP.make_model(p, Q.Q4_K)),
              ("llama Q6_K", lambda p: TP.make_model(p, Q.Q6_K)),
+             ("llama IQ4_NL", lambda p: TP.make_model(p, Q.IQ4_NL)),
              ("gpt2 Q8_0", lambda p: TG.make_gpt2(p, Q.Q8_0)),
              ("bert Q8_0", lambda p: TG.make_bert(p, Q.Q8_0))]
     for name, maker in cases:
@@ -150,7 +173,7 @@ with tempfile.TemporaryDirectory() as d:
         maker(g)
         model = C.Model(g)
         image = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, verbose=False)
-        if "_K" in name:
+        if "_K" in name or "IQ4" in name:
             b = C.build(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, "f16", "General")
             kept = all(e[2] == e[1] and not e[4] for e in b.log if e[1] == name.split()[1])
             report(kept, f"{name:11s} matrices kept native (not repacked)")

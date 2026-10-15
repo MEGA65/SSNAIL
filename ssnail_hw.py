@@ -59,8 +59,8 @@ def roundf(v):
 
 # --- GEMV ----------------------------------------------------------------------
 def gemv_quant(raw_blocks, fmt, rows, cols, x):
-    """Quantised weights (Q8_0 = 8, Q4_0 = 2, MXFP4 = 39) against a
-    Q8_0-quantised x.
+    """Quantised weights (Q8_0 = 8, Q4_0 = 2, IQ4_NL = 20, MXFP4 = 39) against
+    a Q8_0-quantised x (the K-quants, IQ4_XS and TQ2_0: gemv_kquant).
     Per row: acc = 0; for each block b in order:
         isum = sum over the block of q_w * q_x           (exact integer)
         acc  = acc + F32(isum) * (F32(d_w) * F32(d_x))   (each op rounded)
@@ -78,6 +78,12 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
         lo = (nib & 0x0F).astype(np.int32) - 8                 # elements 0..15
         hi = (nib >> 4).astype(np.int32) - 8                   # elements 16..31
         qw = np.concatenate([lo, hi], axis=2)
+    elif fmt == 20:
+        # IQ4_NL: as Q4_0, the nibbles index kvalues_iq4nl
+        blk = np.frombuffer(raw_blocks, dtype=np.uint8).reshape(rows, nb, 18)
+        dw = blk[:, :, 0:2].copy().view(np.float16)[..., 0]
+        nib = blk[:, :, 2:]
+        qw = np.concatenate([IQ4_VALUES[nib & 0x0F], IQ4_VALUES[nib >> 4]], axis=2)
     elif fmt == 39:
         # MXFP4: E8M0 exponent e (scale ggml_e8m0_to_fp32_half(e), a power of
         # two), then 16 bytes of E2M1 nibbles (doubled: kvalues_mxfp4), low
@@ -100,8 +106,12 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
 
 
 # --- K-quants (256-weight super-blocks) -----------------------------------------
-K_FORMATS = {10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K"}
-K_BYTES = {10: 84, 11: 110, 12: 144, 13: 176, 14: 210}
+K_FORMATS = {10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K",
+             23: "IQ4_XS", 35: "TQ2_0"}
+K_BYTES = {10: 84, 11: 110, 12: 144, 13: 176, 14: 210, 23: 136, 35: 66}
+# IQ4_NL / IQ4_XS: the 16 values a 4-bit index stands for (ggml's kvalues_iq4nl)
+IQ4_VALUES = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113],
+                      dtype=np.int64)
 
 
 def quantize_q8_k(x):
@@ -149,6 +159,19 @@ def kquant_parts(raw, fmt, n):
             qh = (b[:, 16:48].reshape(n, -1, 1, 32) >> np.arange(8, dtype=np.uint8).reshape(1, 1, 8, 1)) & 1
             q = q | (qh.reshape(n, 256).astype(np.int64) << 4)
         return q, np.repeat(sc, 2, axis=1), np.repeat(mn, 2, axis=1), d, dmin
+    if fmt == 23:                                              # IQ4_XS
+        d = f16(b[:, 0:2])
+        sh = b[:, 2].astype(np.int64) | (b[:, 3].astype(np.int64) << 8)
+        sl = b[:, 4:8].astype(np.int64)
+        ib = np.arange(8)
+        ls = ((sl[:, ib // 2] >> (4 * (ib % 2))) & 15) | (((sh[:, None] >> (2 * ib)) & 3) << 4)
+        nib = b[:, 8:136].reshape(n, 8, 16)
+        q = IQ4_VALUES[np.concatenate([nib & 15, nib >> 4], axis=2)].reshape(n, 256)
+        return q, np.repeat(ls - 32, 2, axis=1), None, d, None
+    if fmt == 35:                                              # TQ2_0
+        qs, d = b[:, :64], f16(b[:, 64:66])
+        q = (qs.reshape(n, -1, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3
+        return q.reshape(n, 256).astype(np.int64) - 1, np.ones((n, 16), dtype=np.int64), None, d, None
     if fmt == 14:                                              # Q6_K
         ql, qh, sc, d = b[:, :128], b[:, 128:192], b[:, 192:208].view(np.int8), f16(b[:, 208:210])
         lo = ((ql.reshape(n, -1, 1, 64) >> np.array([0, 4], dtype=np.uint8).reshape(1, 1, 2, 1)) & 15).reshape(n, -1, 32)
