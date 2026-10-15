@@ -268,6 +268,10 @@ class Machine:
         k_a, v_a, nh, nkv, hd, kvf, _r1, _r2 = struct.unpack(
             "<8I", self.read(block, 32))
         kvd = nkv * hd
+        # (the hardware streams K and V: 8-byte aligned, a head's row a
+        # whole number of 8 bytes)
+        if (k_a | v_a) & 7 or hd * (2 if kvf == 1 else 4) % 8:
+            raise SsnailError(f"ATTN: K / V not 8-byte aligned rows at PC ${self.pc:07X}")
         q = self.f32v(q_a, nh * hd).reshape(nh, hd)
         K = self.kv(k_a, (pos + 1) * kvd, kvf).reshape(pos + 1, nkv, hd)
         V = self.kv(v_a, (pos + 1) * kvd, kvf).reshape(pos + 1, nkv, hd)

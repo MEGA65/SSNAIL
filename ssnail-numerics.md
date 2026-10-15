@@ -59,6 +59,10 @@ so it gets a compact format.
   ((p0 + p1) + (p2 + p3)) + ((p4 + p5) + (p6 + p7)), every operation
   rounded (`dot8`).  (An exact wide accumulator was considered: about 2k
   LUTs for accuracy inference does not need.)
+- **ATTN:** scores s_t = dot8(k_t, q)·rsqrt(hd) (the float lane, as float
+  GEMV); softmax as below; out = out + w_t·v_t sequentially over t for each
+  element (also in the float lane).  K and V are streamed: 8-byte aligned,
+  a head's row a whole number of 8 bytes.
 - **Vector unit (VADD, VMUL, RMSNORM, LAYERNORM, SILUMUL, GELU, ROPE,
   MEANROWS, softmax inside ATTN):** one pipelined F32 add/multiply datapath.
   Vectors are short, so one element per cycle is ample.

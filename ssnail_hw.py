@@ -398,15 +398,13 @@ def meanrows(M):
 
 def attention_head(q, K, V):
     """One head.  q: (hd,) F32; K, V: (T, hd) as stored (F16 -> F32 exact).
-    s_t = seq_sum(q * k_t) * recip(sqrt(hd))   [scale = rsqrt(hd)]
+    s_t = dot8(k_t, q) * recip(sqrt(hd))       [scale = rsqrt(hd)]
     m = max(s); e_t = EXP(s_t - m); z = seq_sum(e); w_t = e_t * recip(z)
     out = sequential over t of out + w_t * v_t."""
     q = np.asarray(q, dtype=F32)
     K = np.asarray(K, dtype=F32)
     V = np.asarray(V, dtype=F32)
-    prods = (K * q[None, :]).astype(F32)
-    s = np.add.accumulate(prods, axis=1, dtype=F32)[:, -1]
-    s = (s * rsqrt(F32(q.size))).astype(F32)
+    s = (dot8(K, q) * rsqrt(F32(q.size))).astype(F32)
     e = EXP((s - s.max()).astype(F32))
     w = (e * recip(seq_sum(e))).astype(F32)
     out = np.zeros(q.size, dtype=F32)
