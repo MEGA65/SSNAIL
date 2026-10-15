@@ -116,8 +116,10 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
 
 # --- K-quants (256-weight super-blocks) -----------------------------------------
 K_FORMATS = {10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K",
-             23: "IQ4_XS", 35: "TQ2_0"}
-K_BYTES = {10: 84, 11: 110, 12: 144, 13: 176, 14: 210, 23: 136, 35: 66}
+             23: "IQ4_XS", 35: "TQ2_0",
+             16: "IQ2_XXS", 17: "IQ2_XS", 22: "IQ2_S", 18: "IQ3_XXS", 21: "IQ3_S"}
+K_BYTES = {10: 84, 11: 110, 12: 144, 13: 176, 14: 210, 23: 136, 35: 66,
+           16: 66, 17: 74, 22: 82, 18: 98, 21: 110}
 # IQ4_NL / IQ4_XS: the 16 values a 4-bit index stands for (ggml's kvalues_iq4nl)
 IQ4_VALUES = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113],
                       dtype=np.int64)
@@ -135,6 +137,41 @@ def quantize_q8_k(x):
         idv = np.where(d != 0, F32(1) / np.where(d != 0, d, F32(1)), F32(0)).astype(F32)
     q = roundf((x * idv[:, None]).astype(F32)).astype(np.int64)
     return d, q, q.reshape(-1, 16, 16).sum(axis=2)
+
+
+# --- IQ2 / IQ3 codebooks (ggml's iq2xxs_grid .. iq3s_grid) ----------------------
+def _iq_grid(name):
+    """the codebook as small integers, (entries, values per entry), from
+    gguf-py's packed copy (which ggml's tables are checked against there)"""
+    from gguf import quants as GQ
+    c = getattr(GQ, name)
+    c.init_grid()
+    return np.rint(c.grid.reshape(c.grid_shape)).astype(np.int64)
+
+
+_IQ_GRIDS = {}
+
+
+def iq_grid(fmt):
+    """fmt's codebook: IQ2_XXS 256 x 8, IQ2_XS 512 x 8, IQ2_S 1024 x 8 (values
+    8, 25, 43), IQ3_XXS 256 x 4 (4 .. 62), IQ3_S 512 x 4 (1 .. 15)"""
+    if fmt not in _IQ_GRIDS:
+        _IQ_GRIDS[fmt] = _iq_grid({16: "IQ2_XXS", 17: "IQ2_XS", 22: "IQ2_S",
+                                   18: "IQ3_XXS", 21: "IQ3_S"}[fmt])
+    return _IQ_GRIDS[fmt]
+
+
+def iq_ksigns():
+    """ggml's ksigns_iq2xs: 7 stored sign bits, the eighth their parity"""
+    k = np.arange(128)
+    par = np.array([bin(v).count("1") & 1 for v in k])
+    return k | (par << 7)
+
+
+def _sign_bits(sb):
+    """bytes of 8 sign bits -> +1 / -1 per bit, bit 0 first"""
+    bits = (sb[..., None].astype(np.int64) >> np.arange(8)) & 1
+    return (1 - 2 * bits).reshape(*sb.shape[:-1], -1)
 
 
 def kquant_parts(raw, fmt, n):
@@ -181,6 +218,48 @@ def kquant_parts(raw, fmt, n):
         qs, d = b[:, :64], f16(b[:, 64:66])
         q = (qs.reshape(n, -1, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3
         return q.reshape(n, 256).astype(np.int64) - 1, np.ones((n, 16), dtype=np.int64), None, d, None
+    # IQ2 / IQ3: q = +-grid value; per 16 or 32 weights an odd integer
+    # scale 2s + 1; d times an exact power of two (llama.cpp's
+    # (0.5 + s) * 0.25 = (2s + 1) / 8, (0.5 + s) * 0.5 = (2s + 1) / 4)
+    if fmt == 16:                                              # IQ2_XXS
+        d = f16(b[:, 0:2]) * F32(0.125)
+        aux = b[:, 2:66].copy().view(np.uint32).reshape(n, 8, 2).astype(np.int64)
+        idx = b[:, 2:66].reshape(n, 8, 8)[:, :, 0:4]           # 4 grid indices / 32
+        sg = iq_ksigns()[(aux[:, :, 1:2] >> (7 * np.arange(4))) & 127]       # (n, 8, 4)
+        q = iq_grid(16)[idx] * _sign_bits(sg.reshape(n, 8, 4)).reshape(n, 8, 4, 8)
+        sc = np.repeat(2 * (aux[:, :, 1] >> 28) + 1, 2, axis=1)
+        return q.reshape(n, 256), sc, None, d, None
+    if fmt == 17:                                              # IQ2_XS
+        d = f16(b[:, 0:2]) * F32(0.125)
+        qs = b[:, 2:66].copy().view(np.uint16).astype(np.int64)                # (n, 32)
+        sb = b[:, 66:74].astype(np.int64)
+        s16 = np.stack([sb & 15, sb >> 4], axis=2).reshape(n, 16)
+        q = iq_grid(17)[qs & 511] * _sign_bits(iq_ksigns()[qs >> 9][..., None]).reshape(n, 32, 8)
+        return q.reshape(n, 256), 2 * s16 + 1, None, d, None
+    if fmt == 22:                                              # IQ2_S
+        d = f16(b[:, 0:2]) * F32(0.125)
+        qs, signs, qh, sb = b[:, 2:34], b[:, 34:66], b[:, 66:74], b[:, 74:82].astype(np.int64)
+        hi = (qh[:, :, None].astype(np.int64) >> (2 * np.arange(4))) & 3      # (n, 8, 4)
+        idx = qs.astype(np.int64) | (hi.reshape(n, 32) << 8)
+        q = iq_grid(22)[idx] * _sign_bits(signs[..., None]).reshape(n, 32, 8)
+        s16 = np.stack([sb & 15, sb >> 4], axis=2).reshape(n, 16)
+        return q.reshape(n, 256), 2 * s16 + 1, None, d, None
+    if fmt == 18:                                              # IQ3_XXS
+        d = f16(b[:, 0:2]) * F32(0.25)
+        idx = b[:, 2:66].astype(np.int64)                      # 64 x 4 values
+        aux = b[:, 66:98].copy().view(np.uint32).astype(np.int64)             # (n, 8)
+        sg = iq_ksigns()[(aux[:, :, None] >> (7 * np.arange(4))) & 127]      # (n, 8, 4)
+        q = iq_grid(18)[idx].reshape(n, 8, 4, 8) * _sign_bits(sg.reshape(n, 8, 4)).reshape(n, 8, 4, 8)
+        sc = np.repeat(2 * (aux >> 28) + 1, 2, axis=1)
+        return q.reshape(n, 256), sc, None, d, None
+    if fmt == 21:                                              # IQ3_S
+        d = f16(b[:, 0:2])
+        qs, qh, signs, sb = b[:, 2:66], b[:, 66:74], b[:, 74:106], b[:, 106:110].astype(np.int64)
+        hi = (qh[:, :, None].astype(np.int64) >> np.arange(8)) & 1           # (n, 8, 8)
+        idx = qs.astype(np.int64) | (hi.reshape(n, 64) << 8)
+        q = iq_grid(21)[idx].reshape(n, 256) * _sign_bits(signs)
+        s32 = np.stack([sb & 15, sb >> 4], axis=2).reshape(n, 8)
+        return q, np.repeat(2 * s32 + 1, 2, axis=1), None, d, None
     if fmt == 14:                                              # Q6_K
         ql, qh, sc, d = b[:, :128], b[:, 128:192], b[:, 192:208].view(np.int8), f16(b[:, 208:210])
         lo = ((ql.reshape(n, -1, 1, 64) >> np.array([0, 4], dtype=np.uint8).reshape(1, 1, 2, 1)) & 15).reshape(n, -1, 32)

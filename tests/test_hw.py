@@ -111,7 +111,8 @@ report(np.max(np.abs(fast - ref)) / np.max(np.abs(ref)) < 0.03, "GEMV IQ4_NL: hw
 
 # 2b. K-quants: the parts are gguf-py's dequantisation, and the vectorised
 # GEMV equals a scalar reading of its definition (ssnail_hw.gemv_kquant)
-D_OFF = {10: [80, 82], 11: [108], 12: [0, 2], 13: [0, 2], 14: [208], 23: [0], 35: [64]}
+D_OFF = {10: [80, 82], 11: [108], 12: [0, 2], 13: [0, 2], 14: [208], 23: [0], 35: [64],
+         16: [0], 17: [0], 22: [0], 18: [0], 21: [0]}
 
 
 def k_random(fmt, n):
@@ -124,7 +125,7 @@ def k_random(fmt, n):
 
 
 for fmt, name in H.K_FORMATS.items():
-    rows, cols = 3, 512
+    rows, cols = 8, 512
     nb = cols // 256
     raw = k_random(fmt, rows * nb)
     q, sc, mn, d, dmin = H.kquant_parts(raw, fmt, rows * nb)
@@ -151,9 +152,14 @@ for fmt, name in H.K_FORMATS.items():
         slow.append(acc)
     report(np.array_equal(fast, np.array(slow, dtype=F32)),
            f"GEMV {name}: vectorised emulator == scalar definition (bit-exact)")
-    yf = ref.reshape(rows, cols).astype(np.float64) @ xv
-    rel = np.max(np.abs(fast - yf)) / np.max(np.abs(yf))
-    report(rel < 0.03, f"GEMV {name}: hw vs float rel.err {rel:.1e}")
+    # the datapath against gguf-py's weights and the quantised x (only F32
+    # rounding apart), then against float x (x's 8-bit quantisation too)
+    W = ref.reshape(rows, cols).astype(np.float64)
+    yq = W @ (qx.reshape(-1) * np.repeat(dx, 256)).astype(np.float64)
+    report(np.max(np.abs(fast - yq)) <= 1e-5 * np.max(np.abs(yq)), f"GEMV {name}: hw == dequantised w . x")
+    yf = W @ xv
+    rel = np.sqrt(np.mean((fast - yf) ** 2) / np.mean(yf ** 2))
+    report(rel < 0.03, f"GEMV {name}: hw vs float rms rel.err {rel:.1e}")
 
 # 2c. The tools' K-quant quantisers pack what gguf-py dequantises
 import ssnail_kquant as KQ  # noqa: E402
