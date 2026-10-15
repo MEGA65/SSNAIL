@@ -20,7 +20,8 @@ so it gets a compact format.
 | Activation vectors (residual stream, q, attention output, FFN intermediates, logits) | **F32** | unchanged from ISA v1; small, so cost is negligible |
 | Norm gains/biases, RoPE table | **F32** | unchanged |
 | **KV cache** | **F16** | changed from F32: halves the largest activation structure and its per-token traffic |
-| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for quantised weight formats only |
+| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q4_0 and MXFP4 weights |
+| GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K weights |
 
 ## Arithmetic
 
@@ -30,6 +31,18 @@ so it gets a compact format.
   d_w·d_x and accumulated into the row result in F32, block by block in
   order.  This matches llama.cpp's CPU dot products, so results can be
   compared with llama.cpp directly.
+- **GEMV, MXFP4 weights:** as Q4_0, with the E2M1 values doubled (ggml's
+  kvalues) as the integers and d_w = ggml_e8m0_to_fp32_half(e), a power of
+  two.
+- **GEMV, K-quant weights (Q2_K .. Q6_K; emulator only so far):** per
+  256-weight super-block, two exact integers: S1 = Σ over 16-weight groups g
+  of sc[g]·(Σ q_w·q_x over g), and, for the formats with mins (Q2_K, Q4_K,
+  Q5_K), S2 = Σ m[g]·(Σ q_x over g).  Then, each operation rounded:
+  t = F32(S1)·(d·d_x) − F32(S2)·(dmin·d_x), and acc = acc + t, super-block
+  by super-block in order.  q_w is the raw quant less any fixed offset
+  (Q3_K −4·(1−h), Q6_K −32), sc the 16-group's integer scale (Q4_K / Q5_K
+  repeat each 32-group's), as gguf-py's dequantisers.  Like llama.cpp's
+  Q8_K dot products in structure; not bit-identical to them.
 - **GEMV, float weights (F32, F16, BF16):** the input is not quantised.
   Products go into a wide fixed-point accumulator (the single float lane with
   the 2-DSP shifter), which is rounded once to F32 at the end of the row.

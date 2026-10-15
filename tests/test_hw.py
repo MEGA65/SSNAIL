@@ -70,6 +70,53 @@ for fmt, name in ((8, "Q8_0"), (2, "Q4_0")):
     report(np.array_equal(fast, np.array(slow, dtype=F32)),
            f"GEMV {name}: vectorised emulator == scalar definition (bit-exact)")
 
+# 2b. K-quants: the parts are gguf-py's dequantisation, and the vectorised
+# GEMV equals a scalar reading of its definition (ssnail_hw.gemv_kquant)
+from gguf.quants import dequantize  # noqa: E402
+D_OFF = {10: [80, 82], 11: [108], 12: [0, 2], 13: [0, 2], 14: [208]}
+
+
+def k_random(fmt, n):
+    """n random super-blocks (gguf-py has no K-quant quantisers) with sane
+    F16 d / dmin"""
+    b = rng.integers(0, 256, (n, H.K_BYTES[fmt]), dtype=np.uint8)
+    for o in D_OFF[fmt]:
+        b[:, o:o + 2] = (rng.standard_normal((n, 1)) * 0.01).astype(np.float16).view(np.uint8)
+    return b.tobytes()
+
+
+for fmt, name in H.K_FORMATS.items():
+    rows, cols = 3, 512
+    nb = cols // 256
+    raw = k_random(fmt, rows * nb)
+    q, sc, mn, d, dmin = H.kquant_parts(raw, fmt, rows * nb)
+    w = d[:, None].astype(np.float64) * np.repeat(sc, 16, axis=1) * q
+    if mn is not None:
+        w = w - dmin[:, None].astype(np.float64) * np.repeat(mn, 16, axis=1)
+    ref = dequantize(np.frombuffer(raw, dtype=np.uint8).reshape(rows, -1), Q(fmt)).reshape(-1, 256)
+    report(np.allclose(w, ref, rtol=1e-6, atol=1e-9), f"{name}: unpacked parts == gguf-py dequantize")
+    xv = rng.standard_normal(cols).astype(F32)
+    fast = H.gemv_quant(raw, fmt, rows, cols, xv)
+    dx, qx, bsum = H.quantize_q8_k(xv)
+    slow = []
+    for r in range(rows):
+        acc = F32(0)
+        for s_ in range(nb):
+            i = r * nb + s_
+            S1 = sum(int(sc[i, g]) * int(np.dot(q[i, 16 * g:16 * g + 16], qx[s_, 16 * g:16 * g + 16]))
+                     for g in range(16))
+            t = F32(F32(S1) * F32(d[i] * dx[s_]))
+            if mn is not None:
+                S2 = sum(int(mn[i, g]) * int(bsum[s_, g]) for g in range(16))
+                t = F32(t - F32(F32(S2) * F32(dmin[i] * dx[s_])))
+            acc = F32(acc + t)
+        slow.append(acc)
+    report(np.array_equal(fast, np.array(slow, dtype=F32)),
+           f"GEMV {name}: vectorised emulator == scalar definition (bit-exact)")
+    yf = ref.reshape(rows, cols).astype(np.float64) @ xv
+    rel = np.max(np.abs(fast - yf)) / np.max(np.abs(yf))
+    report(rel < 0.03, f"GEMV {name}: hw vs float rel.err {rel:.1e}")
+
 # 3. Function tables
 for tab, f, lo, hi, name in ((H.SILU, lambda v: v / (1 + np.exp(-v)), -10, 10, "SiLU"),
                              (H.GELU, lambda v: 0.5 * v * (1 + np.tanh(0.7978845608028654 * (v + 0.044715 * v ** 3))), -8, 8, "GELU"),

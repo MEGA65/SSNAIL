@@ -89,12 +89,95 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
         kv = np.array([0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12], dtype=np.int32)
         nib = blk[:, :, 1:]
         qw = np.concatenate([kv[nib & 0x0F], kv[nib >> 4]], axis=2)
+    elif fmt in K_FORMATS:
+        return gemv_kquant(raw_blocks, fmt, rows, cols, x)
     else:
         raise ValueError(fmt)
     isum = np.einsum("rbk,bk->rb", qw, qx.astype(np.int32))    # exact
     scale = (dw.astype(F32) * dx.astype(F32)[None, :]).astype(F32)
     terms = (isum.astype(F32) * scale).astype(F32)
     return np.add.accumulate(terms, axis=1, dtype=F32)[:, -1]
+
+
+# --- K-quants (256-weight super-blocks) -----------------------------------------
+K_FORMATS = {10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K"}
+K_BYTES = {10: 84, 11: 110, 12: 144, 13: 176, 14: 210}
+
+
+def quantize_q8_k(x):
+    """The GEMV input for K-quant weights: one F32 scale per 256 elements,
+    and the sums of each 16 quantised elements (as llama.cpp's Q8_K, with
+    quantize_q8_0's arithmetic: d = amax/127; id = d ? 1/d : 0;
+    q = roundf(x*id); d is not rounded to F16)."""
+    x = np.asarray(x, dtype=F32).reshape(-1, 256)
+    amax = np.max(np.abs(x), axis=1).astype(F32)
+    d = (amax / F32(127)).astype(F32)
+    with np.errstate(divide="ignore"):
+        idv = np.where(d != 0, F32(1) / np.where(d != 0, d, F32(1)), F32(0)).astype(F32)
+    q = roundf((x * idv[:, None]).astype(F32)).astype(np.int64)
+    return d, q, q.reshape(-1, 16, 16).sum(axis=2)
+
+
+def kquant_parts(raw, fmt, n):
+    """n super-blocks -> (q (n, 256) ints, sc (n, 16) per 16 weights, m (n, 16)
+    or None, d (n) F32, dmin (n) F32 or None): weight k of 16-group g is
+    d * sc[g] * q - dmin * m[g], as gguf-py's dequantisers."""
+    b = np.frombuffer(raw, dtype=np.uint8).reshape(n, K_BYTES[fmt])
+    f16 = lambda a: a.copy().view(np.float16)[:, 0].astype(F32)
+    if fmt == 10:                                              # Q2_K
+        scales, qs, d, dmin = b[:, :16], b[:, 16:80], f16(b[:, 80:82]), f16(b[:, 82:84])
+        q = (qs.reshape(n, -1, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3
+        return q.reshape(n, 256).astype(np.int64), (scales & 15).astype(np.int64), \
+            (scales >> 4).astype(np.int64), d, dmin
+    if fmt == 11:                                              # Q3_K
+        hmask, qs, sb, d = b[:, :32], b[:, 32:96], b[:, 96:108], f16(b[:, 108:110])
+        ls = (sb[:, :8].reshape(n, 1, 8) >> np.array([0, 4], dtype=np.uint8).reshape(1, 2, 1)).reshape(n, 16)
+        hs = (sb[:, 8:].reshape(n, 1, 4) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 4, 1)).reshape(n, 16)
+        sc = ((ls & 15) | ((hs & 3) << 4)).astype(np.int64) - 32
+        ql = (qs.reshape(n, -1, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)).reshape(n, 256) & 3
+        qh = (hmask.reshape(n, -1, 1, 32) >> np.arange(8, dtype=np.uint8).reshape(1, 1, 8, 1)).reshape(n, 256) & 1
+        return ql.astype(np.int64) - 4 * (1 - qh.astype(np.int64)), sc, None, d, None
+    if fmt in (12, 13):                                        # Q4_K, Q5_K
+        d, dmin, sb = f16(b[:, 0:2]), f16(b[:, 2:4]), b[:, 4:16].reshape(n, 3, 4)
+        dd, mm, md = sb[:, 0], sb[:, 1], sb[:, 2]
+        sc = np.concatenate([dd & 0x3F, (md & 0x0F) | ((dd >> 2) & 0x30)], axis=1).astype(np.int64)
+        mn = np.concatenate([mm & 0x3F, (md >> 4) | ((mm >> 2) & 0x30)], axis=1).astype(np.int64)
+        qs = b[:, 16:144] if fmt == 12 else b[:, 48:176]
+        q = ((qs.reshape(n, -1, 1, 32) >> np.array([0, 4], dtype=np.uint8).reshape(1, 1, 2, 1)) & 15).reshape(n, 256)
+        q = q.astype(np.int64)
+        if fmt == 13:
+            qh = (b[:, 16:48].reshape(n, -1, 1, 32) >> np.arange(8, dtype=np.uint8).reshape(1, 1, 8, 1)) & 1
+            q = q | (qh.reshape(n, 256).astype(np.int64) << 4)
+        return q, np.repeat(sc, 2, axis=1), np.repeat(mn, 2, axis=1), d, dmin
+    if fmt == 14:                                              # Q6_K
+        ql, qh, sc, d = b[:, :128], b[:, 128:192], b[:, 192:208].view(np.int8), f16(b[:, 208:210])
+        lo = ((ql.reshape(n, -1, 1, 64) >> np.array([0, 4], dtype=np.uint8).reshape(1, 1, 2, 1)) & 15).reshape(n, -1, 32)
+        hi = ((qh.reshape(n, -1, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3).reshape(n, -1, 32)
+        q = (lo.astype(np.int64) | (hi.astype(np.int64) << 4)) - 32
+        return q.reshape(n, 256), sc.astype(np.int64), None, d, None
+    raise ValueError(fmt)
+
+
+def gemv_kquant(raw, fmt, rows, cols, x):
+    """K-quant weights against a Q8_K-style input (quantize_q8_k).  Per row:
+    acc = 0; for each super-block s in order, with exact integers
+        S1 = sum over 16-groups g of sc[g] * (sum of q_w * q_x over g)
+        S2 = sum over 16-groups g of m[g] * (sum of q_x over g)
+    and then (each op rounded)
+        t = F32(S1) * (d * dx)                    (formats without mins)
+        t = F32(S1) * (d * dx) - F32(S2) * (dmin * dx)
+        acc = acc + t"""
+    dx, qx, bsum = quantize_q8_k(x)
+    nb = cols // 256
+    q, sc, m, d, dmin = kquant_parts(raw, fmt, rows * nb)
+    isum = np.einsum("rbgk,bgk->rbg", q.reshape(rows, nb, 16, 16), qx.reshape(nb, 16, 16))
+    S1 = np.sum(sc.reshape(rows, nb, 16) * isum, axis=2)
+    t = (S1.astype(F32) * (d.reshape(rows, nb) * dx[None, :]).astype(F32)).astype(F32)
+    if m is not None:
+        S2 = np.sum(m.reshape(rows, nb, 16) * bsum[None, :, :], axis=2)
+        t2 = (S2.astype(F32) * (dmin.reshape(rows, nb) * dx[None, :]).astype(F32)).astype(F32)
+        t = (t - t2).astype(F32)
+    return np.add.accumulate(t, axis=1, dtype=F32)[:, -1]
 
 
 def gemv_float(w, x):
