@@ -175,6 +175,8 @@ class Machine:
                 v = self.f32v(self.ea(x), N0)
                 self.write(self.ea(z), v.astype("<f2").tobytes())
             elif op == I.DEQROW:
+                if a not in I.DEQROW_FORMATS:          # (as the hardware)
+                    raise SsnailError(f"DEQROW of format {a} at PC ${self.pc:07X}")
                 self.put_f32v(self.ea(z), self.weights(a, self.ea(x), 1, N0)[0])
             elif op == I.ARGMAX:
                 v = self.f32v(self.ea(x), N0)

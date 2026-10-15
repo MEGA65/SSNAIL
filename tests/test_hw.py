@@ -171,6 +171,18 @@ for fmt, name in ((12, "Q4_K"), (14, "Q6_K")):
     err = np.sqrt(np.mean((back - W) ** 2)) / np.sqrt(np.mean(W ** 2))
     report(len(raw) == 4 * 2 * H.K_BYTES[fmt] and err < (0.1 if fmt == 12 else 0.03)
            and np.all(back[0, :256] == 0), f"{name} quantiser: round trip rel.rms {err:.3f}")
+# the IQ2 / IQ3 quantisers: gguf-py's layouts (its dequantisation equals the
+# emulator's parts exactly), and a loose quality bound (no scale search)
+for fmt, bound in ((16, 0.45), (17, 0.4), (22, 0.35), (18, 0.3), (21, 0.2)):
+    W = (rng.standard_normal((4, 512)) * 0.05).astype(F32)
+    W[0, :256] = 0
+    raw = KQ.quantize_k(W, fmt)
+    back = dequantize(np.frombuffer(raw, dtype=np.uint8).reshape(4, -1), Q(fmt)).reshape(-1)
+    q, sc, _, d, _ = H.kquant_parts(raw, fmt, 8)
+    mine = (d[:, None].astype(np.float64) * np.repeat(sc, 16, axis=1) * q).reshape(-1).astype(F32)
+    err = np.sqrt(np.mean((back - W.reshape(-1)) ** 2)) / np.sqrt(np.mean(W ** 2))
+    report(len(raw) == 8 * H.K_BYTES[fmt] and np.array_equal(mine, back) and err < bound
+           and np.all(back[:256] == 0), f"{H.K_FORMATS[fmt]} quantiser: layout exact, rel.rms {err:.3f}")
 
 # 3. Function tables
 for tab, f, lo, hi, name in ((H.SILU, lambda v: v / (1 + np.exp(-v)), -10, 10, "SiLU"),
@@ -189,6 +201,8 @@ with tempfile.TemporaryDirectory() as d:
              ("llama Q6_K", lambda p: TP.make_model(p, Q.Q6_K)),
              ("llama IQ4_NL", lambda p: TP.make_model(p, Q.IQ4_NL)),
              ("llama Q5_0", lambda p: TP.make_model(p, Q.Q5_0)),
+             ("llama IQ2_XS", lambda p: TP.make_model(p, Q.IQ2_XS)),
+             ("llama IQ3_S", lambda p: TP.make_model(p, Q.IQ3_S)),
              ("gpt2 Q8_0", lambda p: TG.make_gpt2(p, Q.Q8_0)),
              ("bert Q8_0", lambda p: TG.make_bert(p, Q.Q8_0))]
     for name, maker in cases:
@@ -196,9 +210,11 @@ with tempfile.TemporaryDirectory() as d:
         maker(g)
         model = C.Model(g)
         image = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, verbose=False)
-        if "_K" in name or "IQ4" in name or "Q5_0" in name:
+        if "_K" in name or "IQ" in name or "Q5_0" in name:
             b = C.build(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, "f16", "General")
-            kept = all(e[2] == e[1] and not e[4] for e in b.log if e[1] == name.split()[1])
+            # (embedding tables in IQ2 / IQ3 are repacked: DEQROW)
+            kept = all(e[2] == e[1] and not e[4] for e in b.log
+                       if e[1] == name.split()[1] and e[0] not in C.DEQROW_TENSORS)
             report(kept, f"{name:11s} matrices kept native (not repacked)")
         text = "once upon a time the happy dog sat on the mat" if "bert" not in name \
             else "throw the lamp at the troll"

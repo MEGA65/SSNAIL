@@ -77,13 +77,18 @@ FMT_MXFP4 = 39
 FMT_Q5_0 = 6
 FMT_Q2_K, FMT_Q3_K, FMT_Q4_K, FMT_Q5_K, FMT_Q6_K = 10, 11, 12, 13, 14
 FMT_IQ4_NL, FMT_IQ4_XS, FMT_TQ2_0 = 20, 23, 35
+FMT_IQ2_XXS, FMT_IQ2_XS, FMT_IQ2_S, FMT_IQ3_XXS, FMT_IQ3_S = 16, 17, 22, 18, 21
+# the codebook formats: GEMV only (DEQROW does not take them)
+IQ_FORMATS = {FMT_IQ2_XXS, FMT_IQ2_XS, FMT_IQ2_S, FMT_IQ3_XXS, FMT_IQ3_S}
 # 256-weight super-block formats (the hardware's K-quant path)
-K_FORMATS = {FMT_Q2_K, FMT_Q3_K, FMT_Q4_K, FMT_Q5_K, FMT_Q6_K, FMT_IQ4_XS, FMT_TQ2_0}
+K_FORMATS = {FMT_Q2_K, FMT_Q3_K, FMT_Q4_K, FMT_Q5_K, FMT_Q6_K, FMT_IQ4_XS, FMT_TQ2_0} | IQ_FORMATS
 # Formats the v1 hardware/emulator execute natively.  Anything else is
 # repacked by the converter.
 # Formats GEMV runs on its integer MAC lanes (gemv_quant numerics)
 QUANT_FORMATS = {FMT_Q4_0, FMT_Q5_0, FMT_Q8_0, FMT_IQ4_NL, FMT_MXFP4} | K_FORMATS
 NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_BF16} | QUANT_FORMATS
+# ... and DEQROW (embedding tables)
+DEQROW_FORMATS = NATIVE_FORMATS - IQ_FORMATS
 
 # --- Image layout ---------------------------------------------------------------
 HYPERRAM_BASE = 0x8000000

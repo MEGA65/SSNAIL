@@ -21,7 +21,7 @@ so it gets a compact format.
 | Norm gains/biases, RoPE table | **F32** | unchanged |
 | **KV cache** | **F16** | changed from F32: halves the largest activation structure and its per-token traffic |
 | GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q4_0, IQ4_NL and MXFP4 weights |
-| GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K, IQ4_XS and TQ2_0 weights |
+| GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K, IQ4_XS, TQ2_0 and IQ2 / IQ3 weights |
 
 ## Arithmetic
 
@@ -47,6 +47,12 @@ so it gets a compact format.
   (Q3_K −4·(1−h), Q6_K −32), sc the 16-group's integer scale (Q4_K / Q5_K
   repeat each 32-group's), as gguf-py's dequantisers.  Like llama.cpp's
   Q8_K dot products in structure; not bit-identical to them.
+- **GEMV, IQ2 / IQ3 weights (IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S):** the
+  K-quant arithmetic above, with q_w = ± the codebook value (ggml's grids:
+  8 / 25 / 43 for IQ2, 4 .. 62 or 1 .. 15 for IQ3), sc = 2s + 1 per 16 or 32
+  weights, and d = F32(d) / 8 (IQ2) or / 4 (IQ3_XXS), exact: llama.cpp's
+  d·(0.5 + s)·0.25 is d/8·(2s + 1).  GEMV only: DEQROW does not take them,
+  so the converter repacks IQ2 / IQ3 embedding tables.
 - **GEMV, float weights (F32, F16, BF16):** the input is not quantised.
   Products go into a wide fixed-point accumulator (the single float lane with
   the 2-DSP shifter), which is rounded once to F32 at the end of the row.

@@ -45,8 +45,10 @@ import ssnail_kquant as KQ
 FMT_BY_NAME = {"f32": I.FMT_F32, "f16": I.FMT_F16, "bf16": I.FMT_BF16,
                "q8_0": I.FMT_Q8_0, "q4_0": I.FMT_Q4_0, "q5_0": I.FMT_Q5_0,
                "mxfp4": I.FMT_MXFP4, "q4_k": I.FMT_Q4_K, "q6_k": I.FMT_Q6_K,
-               "iq4_nl": I.FMT_IQ4_NL}
+               "iq4_nl": I.FMT_IQ4_NL, "iq2_xxs": I.FMT_IQ2_XXS, "iq2_xs": I.FMT_IQ2_XS,
+               "iq2_s": I.FMT_IQ2_S, "iq3_xxs": I.FMT_IQ3_XXS, "iq3_s": I.FMT_IQ3_S}
 ARCHES = ("llama", "gpt2", "bert")
+DEQROW_TENSORS = ("token_embd.weight", "position_embd.weight", "token_types.weight")
 
 
 class ImageTooBig(Exception):
@@ -435,7 +437,9 @@ class Builder:
         src = int(t.tensor_type)
         rows, cols = m.shape(name)
         big_table = name in ("token_embd.weight", "output.weight")
-        if self.policy == "keep" and src in I.NATIVE_FORMATS:
+        # embedding tables are read by DEQROW
+        native = I.DEQROW_FORMATS if name in DEQROW_TENSORS else I.NATIVE_FORMATS
+        if self.policy == "keep" and src in native:
             fmt, blob, rp = src, np.asarray(t.data).tobytes(), False
         else:
             if self.policy == "keep":
