@@ -59,7 +59,7 @@ def roundf(v):
 
 # --- GEMV ----------------------------------------------------------------------
 def gemv_quant(raw_blocks, fmt, rows, cols, x):
-    """Quantised weights (Q8_0 = 8, Q4_0 = 2, IQ4_NL = 20, MXFP4 = 39) against
+    """Quantised weights (Q8_0 = 8, Q4_0 = 2, Q5_0 = 6, IQ4_NL = 20, MXFP4 = 39) against
     a Q8_0-quantised x (the K-quants, IQ4_XS and TQ2_0: gemv_kquant).
     Per row: acc = 0; for each block b in order:
         isum = sum over the block of q_w * q_x           (exact integer)
@@ -78,6 +78,15 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
         lo = (nib & 0x0F).astype(np.int32) - 8                 # elements 0..15
         hi = (nib >> 4).astype(np.int32) - 8                   # elements 16..31
         qw = np.concatenate([lo, hi], axis=2)
+    elif fmt == 6:
+        # Q5_0: F16 d, 32 high bits (bit j of the little-endian word for
+        # element j), then Q4_0's nibbles; q = (nibble | high << 4) - 16
+        blk = np.frombuffer(raw_blocks, dtype=np.uint8).reshape(rows, nb, 22)
+        dw = blk[:, :, 0:2].copy().view(np.float16)[..., 0]
+        qh = blk[:, :, 2:6].copy().view(np.uint32)[..., 0].astype(np.int32)
+        hb = (qh[..., None] >> np.arange(32, dtype=np.int32)) & 1
+        nib = blk[:, :, 6:]
+        qw = np.concatenate([nib & 0x0F, nib >> 4], axis=2).astype(np.int32) + (hb << 4) - 16
     elif fmt == 20:
         # IQ4_NL: as Q4_0, the nibbles index kvalues_iq4nl
         blk = np.frombuffer(raw_blocks, dtype=np.uint8).reshape(rows, nb, 18)

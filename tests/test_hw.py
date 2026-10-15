@@ -46,13 +46,13 @@ report(np.array_equal(mine, ref), "Q8_0 input quantisation identical to llama.cp
 
 # 2. The vectorised GEMV equals a plain scalar reading of the definition
 rows, cols = 7, 96
-for fmt, name in ((8, "Q8_0"), (2, "Q4_0")):
+for fmt, name in ((8, "Q8_0"), (2, "Q4_0"), (6, "Q5_0")):
     W = rng.standard_normal((rows, cols)).astype(F32)
     raw = np.asarray(quantize(W, Q(fmt))).tobytes()
     xv = rng.standard_normal(cols).astype(F32)
     fast = H.gemv_quant(raw, fmt, rows, cols, xv)
     dx, qx = H.quantize_q8_0(xv)
-    bs = 34 if fmt == 8 else 18
+    bs = {8: 34, 2: 18, 6: 22}[fmt]
     slow = []
     for r in range(rows):
         acc = F32(0)
@@ -61,6 +61,11 @@ for fmt, name in ((8, "Q8_0"), (2, "Q4_0")):
             dw = F32(np.frombuffer(raw[o:o + 2], dtype=np.float16)[0])
             if fmt == 8:
                 qw = np.frombuffer(raw[o + 2:o + 34], dtype=np.int8).astype(int)
+            elif fmt == 6:
+                qh = int.from_bytes(raw[o + 2:o + 6], "little")
+                nib = np.frombuffer(raw[o + 6:o + 22], dtype=np.uint8).astype(int)
+                qw = np.array([((nib[j % 16] >> (4 * (j // 16))) & 15) + (((qh >> j) & 1) << 4) - 16
+                               for j in range(32)])
             else:
                 nib = np.frombuffer(raw[o + 2:o + 18], dtype=np.uint8).astype(int)
                 qw = np.concatenate([(nib & 15) - 8, (nib >> 4) - 8])
@@ -69,6 +74,17 @@ for fmt, name in ((8, "Q8_0"), (2, "Q4_0")):
         slow.append(acc)
     report(np.array_equal(fast, np.array(slow, dtype=F32)),
            f"GEMV {name}: vectorised emulator == scalar definition (bit-exact)")
+
+# 2. (cont.) Q5_0's layout as gguf-py reads it: weight = F16 d * q
+W = rng.standard_normal((3, 64)).astype(F32)
+raw = np.asarray(quantize(W, Q.Q5_0)).tobytes()
+blk = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 22)
+qh = blk[:, 2:6].copy().view(np.uint32)[:, 0].astype(np.int64)
+q = np.concatenate([blk[:, 6:] & 15, blk[:, 6:] >> 4], axis=1).astype(np.int64) \
+    + (((qh[:, None] >> np.arange(32)) & 1) << 4) - 16
+mine = (blk[:, 0:2].copy().view(np.float16).astype(F32) * q).reshape(-1)
+report(np.array_equal(mine, dequantize(blk.reshape(3, -1), Q.Q5_0).reshape(-1)),
+       "Q5_0 layout: d * q equals gguf-py's dequantisation")
 
 # 2a. IQ4_NL (no gguf-py quantiser: random blocks with a sane d)
 rows, cols = 5, 96
@@ -166,6 +182,7 @@ with tempfile.TemporaryDirectory() as d:
              ("llama Q4_K", lambda p: TP.make_model(p, Q.Q4_K)),
              ("llama Q6_K", lambda p: TP.make_model(p, Q.Q6_K)),
              ("llama IQ4_NL", lambda p: TP.make_model(p, Q.IQ4_NL)),
+             ("llama Q5_0", lambda p: TP.make_model(p, Q.Q5_0)),
              ("gpt2 Q8_0", lambda p: TG.make_gpt2(p, Q.Q8_0)),
              ("bert Q8_0", lambda p: TG.make_bert(p, Q.Q8_0))]
     for name, maker in cases:
@@ -173,7 +190,7 @@ with tempfile.TemporaryDirectory() as d:
         maker(g)
         model = C.Model(g)
         image = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, verbose=False)
-        if "_K" in name or "IQ4" in name:
+        if "_K" in name or "IQ4" in name or "Q5_0" in name:
             b = C.build(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, "f16", "General")
             kept = all(e[2] == e[1] and not e[4] for e in b.log if e[1] == name.split()[1])
             report(kept, f"{name:11s} matrices kept native (not repacked)")
