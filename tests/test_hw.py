@@ -117,6 +117,17 @@ for fmt, name in H.K_FORMATS.items():
     rel = np.max(np.abs(fast - yf)) / np.max(np.abs(yf))
     report(rel < 0.03, f"GEMV {name}: hw vs float rel.err {rel:.1e}")
 
+# 2c. The tools' K-quant quantisers pack what gguf-py dequantises
+import ssnail_kquant as KQ  # noqa: E402
+for fmt, name in ((12, "Q4_K"), (14, "Q6_K")):
+    W = (rng.standard_normal((4, 512)) * 0.05).astype(F32)
+    W[0, :256] = 0
+    raw = KQ.quantize_k(W, fmt)
+    back = dequantize(np.frombuffer(raw, dtype=np.uint8).reshape(4, -1), Q(fmt)).reshape(4, 512)
+    err = np.sqrt(np.mean((back - W) ** 2)) / np.sqrt(np.mean(W ** 2))
+    report(len(raw) == 4 * 2 * H.K_BYTES[fmt] and err < (0.1 if fmt == 12 else 0.03)
+           and np.all(back[0, :256] == 0), f"{name} quantiser: round trip rel.rms {err:.3f}")
+
 # 3. Function tables
 for tab, f, lo, hi, name in ((H.SILU, lambda v: v / (1 + np.exp(-v)), -10, 10, "SiLU"),
                              (H.GELU, lambda v: 0.5 * v * (1 + np.tanh(0.7978845608028654 * (v + 0.044715 * v ** 3))), -8, 8, "GELU"),
@@ -130,6 +141,8 @@ with tempfile.TemporaryDirectory() as d:
     cases = [("llama Q8_0", lambda p: TP.make_model(p, Q.Q8_0)),
              ("llama Q4_0", lambda p: TP.make_model(p, Q.Q4_0)),
              ("llama F16", lambda p: TP.make_model(p, Q.F16)),
+             ("llama Q4_K", lambda p: TP.make_model(p, Q.Q4_K)),
+             ("llama Q6_K", lambda p: TP.make_model(p, Q.Q6_K)),
              ("gpt2 Q8_0", lambda p: TG.make_gpt2(p, Q.Q8_0)),
              ("bert Q8_0", lambda p: TG.make_bert(p, Q.Q8_0))]
     for name, maker in cases:
@@ -137,6 +150,10 @@ with tempfile.TemporaryDirectory() as d:
         maker(g)
         model = C.Model(g)
         image = C.convert(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, verbose=False)
+        if "_K" in name:
+            b = C.build(model, 32, "keep", C.FMT_BY_NAME["q8_0"], 8, "f16", "General")
+            kept = all(e[2] == e[1] and not e[4] for e in b.log if e[1] == name.split()[1])
+            report(kept, f"{name:11s} matrices kept native (not repacked)")
         text = "once upon a time the happy dog sat on the mat" if "bert" not in name \
             else "throw the lamp at the troll"
         ids = C.encode(model, text)

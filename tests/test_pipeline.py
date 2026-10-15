@@ -22,6 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import ssnail_convert as C   # noqa: E402
 import ssnail_sim as S       # noqa: E402
+import ssnail_kquant as KQ    # noqa: E402
 
 
 def make_model(path, wtype, dim=256, layers=2, heads=8, kv_heads=4, hidden=512,
@@ -63,6 +64,9 @@ def make_model(path, wtype, dim=256, layers=2, heads=8, kv_heads=4, hidden=512,
             w.add_tensor(name, m)
         elif wtype == Q.F16:
             w.add_tensor(name, m.astype(np.float16))
+        elif int(wtype) in KQ.QUANTISERS:
+            qb = np.frombuffer(KQ.quantize_k(m, int(wtype)), dtype=np.uint8).reshape(rows, -1)
+            w.add_tensor(name, qb, raw_shape=qb.shape, raw_dtype=wtype)
         else:
             qb = quantize(m, wtype)
             w.add_tensor(name, qb, raw_shape=qb.shape, raw_dtype=wtype)

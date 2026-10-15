@@ -78,9 +78,9 @@ FMT_Q2_K, FMT_Q3_K, FMT_Q4_K, FMT_Q5_K, FMT_Q6_K = 10, 11, 12, 13, 14
 K_FORMATS = {FMT_Q2_K, FMT_Q3_K, FMT_Q4_K, FMT_Q5_K, FMT_Q6_K}
 # Formats the v1 hardware/emulator execute natively.  Anything else is
 # repacked by the converter.
-NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_Q4_0, FMT_Q8_0, FMT_BF16, FMT_MXFP4}
 # Formats GEMV runs on its integer MAC lanes (gemv_quant numerics)
 QUANT_FORMATS = {FMT_Q4_0, FMT_Q8_0, FMT_MXFP4} | K_FORMATS
+NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_BF16} | QUANT_FORMATS
 
 # --- Image layout ---------------------------------------------------------------
 HYPERRAM_BASE = 0x8000000
