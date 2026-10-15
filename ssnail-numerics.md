@@ -54,8 +54,11 @@ so it gets a compact format.
   d·(0.5 + s)·0.25 is d/8·(2s + 1).  GEMV only: DEQROW does not take them,
   so the converter repacks IQ2 / IQ3 embedding tables.
 - **GEMV, float weights (F32, F16, BF16):** the input is not quantised.
-  Products go into a wide fixed-point accumulator (the single float lane with
-  the 2-DSP shifter), which is rounded once to F32 at the end of the row.
+  The pipelined float lane: each product w·x rounded to F32; product i
+  added into partial sum i mod 8 (each starting from −0); the row's result
+  ((p0 + p1) + (p2 + p3)) + ((p4 + p5) + (p6 + p7)), every operation
+  rounded (`dot8`).  (An exact wide accumulator was considered: about 2k
+  LUTs for accuracy inference does not need.)
 - **Vector unit (VADD, VMUL, RMSNORM, LAYERNORM, SILUMUL, GELU, ROPE,
   MEANROWS, softmax inside ATTN):** one pipelined F32 add/multiply datapath.
   Vectors are short, so one element per cycle is ample.
@@ -84,7 +87,7 @@ The emulator gains a **hardware-numerics mode** that implements exactly the
 above.  Hardware is checked against it:
 
 - **bit-exact** for everything integer or by-construction exact: Q8_0
-  quantisation of the input, integer block sums, the wide accumulator,
+  quantisation of the input, integer block sums, the float lane,
   F32 → F16 conversion, the scalar/control instructions;
 - **within 1 ulp per F32 operation** for the vector unit and the iterative
   reciprocal/rsqrt;

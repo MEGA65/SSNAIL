@@ -86,6 +86,19 @@ mine = (blk[:, 0:2].copy().view(np.float16).astype(F32) * q).reshape(-1)
 report(np.array_equal(mine, dequantize(blk.reshape(3, -1), Q.Q5_0).reshape(-1)),
        "Q5_0 layout: d * q equals gguf-py's dequantisation")
 
+# 2. (cont.) Float weights: dot8 == a scalar reading of its definition
+W = (rng.standard_normal((5, 96)) * 2.0 ** rng.integers(-30, 30, (5, 96))).astype(F32)
+xv = rng.standard_normal(96).astype(F32)
+fast = H.gemv_float(W, xv)
+slow = []
+for r_ in W:
+    p = [F32(-0.0)] * 8
+    for i, (a_, b_) in enumerate(zip(r_, xv)):
+        p[i % 8] = F32(p[i % 8] + F32(a_ * b_))
+    q = [F32(p[2 * i] + p[2 * i + 1]) for i in range(4)]
+    slow.append(F32(F32(q[0] + q[1]) + F32(q[2] + q[3])))
+report(np.array_equal(fast, np.array(slow, dtype=F32)), "GEMV float (dot8): vectorised == scalar definition (bit-exact)")
+
 # 2a. IQ4_NL (no gguf-py quantiser: random blocks with a sane d)
 rows, cols = 5, 96
 b = rng.integers(0, 256, (rows * cols // 32, 18), dtype=np.uint8)
@@ -197,6 +210,7 @@ with tempfile.TemporaryDirectory() as d:
     cases = [("llama Q8_0", lambda p: TP.make_model(p, Q.Q8_0)),
              ("llama Q4_0", lambda p: TP.make_model(p, Q.Q4_0)),
              ("llama F16", lambda p: TP.make_model(p, Q.F16)),
+             ("llama BF16", lambda p: TP.make_model(p, Q.BF16)),
              ("llama Q4_K", lambda p: TP.make_model(p, Q.Q4_K)),
              ("llama Q6_K", lambda p: TP.make_model(p, Q.Q6_K)),
              ("llama IQ4_NL", lambda p: TP.make_model(p, Q.IQ4_NL)),

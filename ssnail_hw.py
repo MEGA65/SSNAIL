@@ -291,15 +291,34 @@ def gemv_kquant(raw, fmt, rows, cols, x):
     return np.add.accumulate(t, axis=1, dtype=F32)[:, -1]
 
 
+FLOAT_LANES = 8
+
+
+def dot8(w, x):
+    """The float lane's dot product, row by row of w (rows, n) with x (n):
+    each product rounded to F32; product i added into partial sum i mod 8
+    (each starting from -0, the identity of addition); then
+    ((p0 + p1) + (p2 + p3)) + ((p4 + p5) + (p6 + p7)), every operation
+    rounded.  (The pipelined adder's latency is 8: each partial's last sum
+    is back just as its next product arrives.)"""
+    w = np.atleast_2d(np.asarray(w, dtype=F32))
+    x = np.asarray(x, dtype=F32)
+    with np.errstate(all="ignore"):
+        prods = (w * x[None, :]).astype(F32)
+        rows, n = prods.shape
+        pad = (-n) % FLOAT_LANES
+        if pad:
+            prods = np.concatenate([prods, np.full((rows, pad), F32(-0.0), dtype=F32)], axis=1)
+        p = np.full((rows, FLOAT_LANES), F32(-0.0), dtype=F32)
+        for g in prods.reshape(rows, -1, FLOAT_LANES).transpose(1, 0, 2):
+            p = (p + g).astype(F32)
+        q = [(p[:, 2 * i] + p[:, 2 * i + 1]).astype(F32) for i in range(4)]
+        return (((q[0] + q[1]).astype(F32)) + ((q[2] + q[3]).astype(F32))).astype(F32)
+
+
 def gemv_float(w, x):
-    """Float weights: products into a wide exact accumulator, rounded once to
-    F32 at the end of each row.  (Emulated as an exactly rounded F64 sum,
-    then F32: identical except in vanishingly rare double-rounding ties.)"""
-    import math
-    w = np.asarray(w, dtype=np.float64)
-    x = np.asarray(x, dtype=F32).astype(np.float64)
-    prods = w * x[None, :]                                     # exact in F64
-    return np.array([F32(math.fsum(r)) for r in prods], dtype=F32)
+    """Float weights (F32, F16 and BF16, exactly as F32): dot8 per row."""
+    return dot8(w, x)
 
 
 # --- Function tables -------------------------------------------------------------
