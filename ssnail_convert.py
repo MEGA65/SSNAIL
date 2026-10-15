@@ -41,7 +41,8 @@ from gguf.quants import dequantize, quantize
 import ssnail_isa as I
 
 FMT_BY_NAME = {"f32": I.FMT_F32, "f16": I.FMT_F16, "bf16": I.FMT_BF16,
-               "q8_0": I.FMT_Q8_0, "q4_0": I.FMT_Q4_0}
+               "q8_0": I.FMT_Q8_0, "q4_0": I.FMT_Q4_0,
+               "mxfp4": I.FMT_MXFP4}
 ARCHES = ("llama", "gpt2", "bert")
 
 

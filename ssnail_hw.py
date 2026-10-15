@@ -59,7 +59,8 @@ def roundf(v):
 
 # --- GEMV ----------------------------------------------------------------------
 def gemv_quant(raw_blocks, fmt, rows, cols, x):
-    """Quantised weights (Q8_0 = 8, Q4_0 = 2) against a Q8_0-quantised x.
+    """Quantised weights (Q8_0 = 8, Q4_0 = 2, MXFP4 = 39) against a
+    Q8_0-quantised x.
     Per row: acc = 0; for each block b in order:
         isum = sum over the block of q_w * q_x           (exact integer)
         acc  = acc + F32(isum) * (F32(d_w) * F32(d_x))   (each op rounded)
@@ -77,6 +78,17 @@ def gemv_quant(raw_blocks, fmt, rows, cols, x):
         lo = (nib & 0x0F).astype(np.int32) - 8                 # elements 0..15
         hi = (nib >> 4).astype(np.int32) - 8                   # elements 16..31
         qw = np.concatenate([lo, hi], axis=2)
+    elif fmt == 39:
+        # MXFP4: E8M0 exponent e (scale ggml_e8m0_to_fp32_half(e), a power of
+        # two), then 16 bytes of E2M1 nibbles (doubled: kvalues_mxfp4), low
+        # nibbles first
+        blk = np.frombuffer(raw_blocks, dtype=np.uint8).reshape(rows, nb, 17)
+        e = blk[:, :, 0].astype(np.uint32)
+        bits = np.where(e < 2, np.uint32(0x00200000) << e, (e - 1) << np.uint32(23))
+        dw = bits.astype(np.uint32).view(F32)
+        kv = np.array([0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12], dtype=np.int32)
+        nib = blk[:, :, 1:]
+        qw = np.concatenate([kv[nib & 0x0F], kv[nib >> 4]], axis=2)
     else:
         raise ValueError(fmt)
     isum = np.einsum("rbk,bk->rb", qw, qx.astype(np.int32))    # exact

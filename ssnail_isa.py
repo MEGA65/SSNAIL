@@ -73,9 +73,12 @@ RZERO = 15        # R15 reads as zero
 
 # --- Weight formats (ggml type numbers) ---------------------------------------
 FMT_F32, FMT_F16, FMT_Q4_0, FMT_Q8_0, FMT_BF16 = 0, 1, 2, 8, 30
+FMT_MXFP4 = 39
 # Formats the v1 hardware/emulator execute natively.  Anything else is
 # repacked by the converter.
-NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_Q4_0, FMT_Q8_0, FMT_BF16}
+NATIVE_FORMATS = {FMT_F32, FMT_F16, FMT_Q4_0, FMT_Q8_0, FMT_BF16, FMT_MXFP4}
+# Formats GEMV runs on its integer MAC lanes (gemv_quant numerics)
+QUANT_FORMATS = {FMT_Q4_0, FMT_Q8_0, FMT_MXFP4}
 
 # --- Image layout ---------------------------------------------------------------
 HYPERRAM_BASE = 0x8000000

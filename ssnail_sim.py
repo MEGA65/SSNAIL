@@ -158,7 +158,7 @@ class Machine:
                     npc = self.ea(x)
             elif op == I.GEMV:
                 xv = self.f32v(self.ea(y), N0)
-                if self.hw and a in (I.FMT_Q8_0, I.FMT_Q4_0):
+                if self.hw and a in I.QUANT_FORMATS:
                     raw = self.read(self.ea(x), N1 * row_bytes(a, N0))
                     v = H.gemv_quant(raw, a, N1, N0, xv)
                 elif self.hw:
