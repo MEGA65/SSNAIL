@@ -10,8 +10,12 @@ PC-side tools for SSNAIL, the MEGA65 LLM inference accelerator.
 | `ssnail_tok.py` | Tokenizer that uses only the image's tables: the reference for the MEGA65-native one |
 | `ssnail_chat.py` | Interactive front end to the emulator: chat/continue for decoders, similarity search for encoders |
 | `ssnail_isa.py` | Instruction set and image layout definitions, shared by both |
+| `ssnail_hw.py` | Hardware numerics: every operation's arithmetic as the VHDL does it, bit by bit |
+| `ssnail_kquant.py` | Quantisers the converter repacks with (Q4_K, Q6_K, IQ4_NL, IQ2 / IQ3) |
 | `tests/test_pipeline.py` | Llama end-to-end tests against an independent numpy implementation |
 | `tests/test_gpt2_bert.py` | The same for GPT-2 and BERT |
+| `tests/test_hw.py` | Hardware numerics: the definitions, and what they cost against the float reference on whole models |
+| `tests/test_auto.py`, `test_desc.py`, `test_tokenizer.py`, `test_findmodels.py` | Format choice, descriptions, tokenizers, model search |
 
 Requirements: Python 3.9+, `pip install gguf numpy`.
 
@@ -219,10 +223,13 @@ a given sustained bandwidth (default 130 MB/s).
   - `gpt2`: GPT-2 family, including the TinyStories GPT-2 models.
   - `bert`: BERT encoders (e.g. all-MiniLM sentence embedders), mean or CLS
     pooling.  The image leaves the pooled embedding at header `$30`.
-- Weight formats executed natively: F32, F16, BF16, Q8_0, Q4_0.  Weights in
-  any other ggml format that gguf-py can dequantize (e.g. the Q4_K/Q6_K in a
-  Q4_K_M file) are repacked to `--fallback` (default Q8_0).  `--wtype` forces
-  one format for every matrix.
+- Weight formats executed natively by GEMV: F32, F16, BF16; Q8_0, Q5_0,
+  Q4_0, IQ4_NL, MXFP4; Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS, TQ2_0; IQ2_XXS,
+  IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S.  DEQROW (embedding tables) takes all of
+  these except the IQ2 / IQ3 formats, whose embedding tables are repacked.
+  A file's weights in any of these formats are copied byte for byte; any
+  other ggml format that gguf-py can dequantize is repacked to `--fallback`
+  (default Q8_0).  `--wtype` forces one format for every matrix.
 - Prompt tokenization: SentencePiece (`llama`), byte-level BPE (`gpt2`) and
   WordPiece (`bert`, uncased).  The GPT-2 pre-tokenizer is exact for English
   text; unusual Unicode may split differently from the reference.
@@ -232,11 +239,11 @@ a given sustained bandwidth (default 130 MB/s).
   --hw`, `make foo.chat HW=1`), defined bit by bit in `ssnail_hw.py`, which
   the VHDL is checked against.  On the test models, hardware numerics change
   logits by about 1% and never change the greedy choice.
-- Activations, norm weights and the RoPE table are float32.
-  This defines the reference semantics; the hardware will use narrower
-  fixed-point formats and be checked against the emulator within a tolerance.
-  The float32 KV cache is the main memory cost: 8 bytes × layers × ctx ×
-  kv_dim.
+- Activations, norm weights and the RoPE table are float32.  The hardware's
+  arithmetic (input quantisation, integer block sums, float lane order,
+  function tables) is fixed in `ssnail-numerics.md` and `ssnail_hw.py`, and
+  the VHDL testbenches check it bit for bit against the emulator.  The KV
+  cache costs 4 bytes × layers × ctx × kv_dim at F16 (8 at F32).
 
 Verified: logits at every position (and BERT's pooled embeddings) match
 independent references to about 3e-7 relative error, for F32, F16, Q8_0 and
@@ -319,7 +326,7 @@ For an encoder image: write the tokens (including [CLS] and [SEP]), set
 once SSNAIL is idle.  The sequence may be up to the header's maximum context
 in length; longer sequences stop with reason 3 and produce no output.
 
-## Instruction set v1 (draft)
+## Instruction set v1
 
 16 bytes per instruction: `op, a, b, 0, X:u32, Y:u32, Z:u32`.
 
@@ -342,7 +349,7 @@ N0–N2 (lengths, set by SETN).
 | $0B | ADDI | R[a] = R[b] + signed Z |
 | $0C | LEA | A[a] = addr(X) + R[b] × Z |
 | $0D/$0E/$0F | BEQ/BNE/BLT | if R[a] ==/!=/< R[b] (unsigned): PC = addr(X) |
-| $10 | GEMV | y at addr(Z) = W at addr(X) · x at addr(Y).  W is N1 rows × N0 columns in format `a` (ggml type number).  Flag `b` bit 0 accumulates into y |
+| $10 | GEMV | y at addr(Z) = W at addr(X) · x at addr(Y).  W is N1 rows × N0 columns in format `a` (ggml type number; the formats under Status).  Flag `b` bit 0 accumulates into y |
 | $11 | DEQROW | f32 vector at addr(Z) = N0 elements of format `a` from addr(X) |
 | $12 | ARGMAX | R[a] = index of the maximum of N0 f32 values at addr(X) |
 | $20 | VADD | Z = X + Y (N0 f32) |
@@ -350,7 +357,7 @@ N0–N2 (lengths, set by SETN).
 | $22 | RMSNORM | Z = X · rsqrt(mean(X²) + eps) · Y, with eps = N2 as float32 bits |
 | $23 | SILUMUL | Z = silu(X) · Y |
 | $24 | ROPE | rotate adjacent pairs of the N0-element vector at addr(X) in place, using N1/2 (cos, sin) pairs at addr(Y); N1 = head dimension |
-| $25 | ATTN | q at addr(Y) attends to K/V rows 0..R[a] inclusive; result at addr(Z).  addr(X) is an 8 × u32 parameter block: K cache, V cache, n_heads, n_kv_heads, head_dim, 3 × reserved.  Causal decoders pass the current position; BERT passes n−1 for every token |
+| $25 | ATTN | q at addr(Y) attends to K/V rows 0..R[a] inclusive; result at addr(Z).  addr(X) is an 8 × u32 parameter block: K cache, V cache, n_heads, n_kv_heads, head_dim, 3 × reserved.  Causal decoders pass the current position; BERT passes n−1 for every token.  K and V rows are 8-byte aligned, a head's row a whole number of 8 bytes |
 | $26 | LAYERNORM | Z = (X − mean) · rsqrt(var + eps) · G + B; G at addr(Y), B immediately after it; eps = N2 |
 | $27 | GELU | Z = gelu(X), tanh approximation (as ggml) |
 | $28 | MEANROWS | Z = mean of R[a] consecutive N0-element f32 rows starting at addr(X) |

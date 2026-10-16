@@ -22,8 +22,9 @@ Layout, low to high:
               token buffer: u32 tokens, last, open-ended
 
 Weight matrices already in a natively supported format (F32, F16, BF16,
-Q8_0, Q4_0, Q5_0, IQ4_NL, MXFP4, Q2_K .. Q6_K, IQ4_XS, TQ2_0) are copied
-byte-for-byte; others (e.g. the IQ2 / IQ3 formats) are repacked to --fallback
+Q8_0, Q4_0, Q5_0, IQ4_NL, MXFP4, Q2_K .. Q6_K, IQ4_XS, TQ2_0, and for GEMV
+IQ2_XXS .. IQ3_S) are copied byte-for-byte; others (e.g. Q4_1, and IQ2 / IQ3
+embedding tables, which DEQROW does not take) are repacked to --fallback
 (Q8_0 by default).  --wtype forces one
 format for every matrix; 'mixed' uses Q8_0 for the layers and Q4_0 for the
 big embedding/classifier; 'auto' picks the best that fits (keep, q8_0,

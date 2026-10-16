@@ -16,16 +16,16 @@ so it gets a compact format.
 
 | Data | Format in RAM | Notes |
 |---|---|---|
-| Weight matrices | as converted: F32, F16, BF16, Q8_0, Q4_0 (ggml layouts) | unchanged from ISA v1 |
+| Weight matrices | as converted, in ggml's layouts: F32, F16, BF16; Q8_0, Q5_0, Q4_0, IQ4_NL, MXFP4; Q2_K .. Q6_K, IQ4_XS, TQ2_0; IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | the formats under Arithmetic |
 | Activation vectors (residual stream, q, attention output, FFN intermediates, logits) | **F32** | unchanged from ISA v1; small, so cost is negligible |
 | Norm gains/biases, RoPE table | **F32** | unchanged |
 | **KV cache** | **F16** | changed from F32: halves the largest activation structure and its per-token traffic |
-| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q4_0, IQ4_NL and MXFP4 weights |
+| GEMV input vector, inside SSNAIL | **Q8_0**: int8, one F16 scale per 32 elements, exactly llama.cpp's `quantize_row_q8_0` | for Q8_0, Q5_0, Q4_0, IQ4_NL and MXFP4 weights |
 | GEMV input vector, K-quant weights | **Q8_K-style**: int8, one F32 scale per 256 elements, with Q8_0's arithmetic (`quantize_q8_k`); plus the sum of each 16 quantised elements | for Q2_K .. Q6_K, IQ4_XS, TQ2_0 and IQ2 / IQ3 weights |
 
 ## Arithmetic
 
-- **GEMV, quantised weights (Q8_0, Q4_0):** the input vector is quantised to
+- **GEMV, quantised weights (Q8_0, Q5_0, Q4_0):** the input vector is quantised to
   Q8_0 as it is loaded into the on-chip buffer.  Per 32-element block,
   Σ q_w·q_x is computed exactly as an integer; it is multiplied by
   d_w·d_x and accumulated into the row result in F32, block by block in
