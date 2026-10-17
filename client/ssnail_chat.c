@@ -11,7 +11,8 @@
     /scan        find the models on the SD card (/models lists them again)
     /hdr N       model N's header fields, from the file
     /load N [direct|port|slow]   load it: direct (default) = DMA straight
-                 into SSNAIL's RAM at $8000000+ through the CPU's view of SDRAM;
+                 into SSNAIL's RAM at $8000000+ through the CPU's view of SDRAM
+                 (and of HyperRAM, for a 72 MB image's last 8 MB);
                  port = DMA into the load port (destination held); slow = the
                  load port, byte by byte
     /check       the loaded header and first payload bytes read back from
@@ -350,9 +351,30 @@ static void list_models(void)
 #define LOAD_SLOW 2
 static uint8_t load_mode;
 static uint32_t dst;                    /* (direct: where the next bytes go) */
+/* direct: SSNAIL's $8000000-$BFFFFFF is SDRAM, which the CPU sees at the same
+   addresses with $D7FE bit 4 set; its $C000000-$C7FFFFF is HyperRAM, which
+   the CPU sees at $8000000 with bit 4 clear */
+static void direct(const uint8_t *src, uint16_t n)
+{
+  uint8_t d7 = lpeek(D7FE);
+  while (n) {
+    uint16_t k = n;
+    if (dst < 0xC000000UL) {
+      if (dst + k > 0xC000000UL) k = 0xC000000UL - dst;
+      lpoke(D7FE, d7 | 0x10);
+      lcopy((uint32_t)(uint16_t)src, dst, k);
+    } else {
+      lpoke(D7FE, d7 & ~0x10);
+      lcopy((uint32_t)(uint16_t)src, IMG + (dst - 0xC000000UL), k);
+    }
+    src += k; dst += k; n -= k;
+  }
+  lpoke(D7FE, d7);
+}
+
 static void lp_send(const uint8_t *src, uint16_t n)
 {
-  if (load_mode == LOAD_DIRECT) { lcopy((uint32_t)(uint16_t)src, dst, n); dst += n; }
+  if (load_mode == LOAD_DIRECT) direct(src, n);
   else if (load_mode == LOAD_SLOW) lp_bytes(src, n);
   else lp_dma(src, n);
 }
@@ -379,9 +401,8 @@ static uint8_t load(uint8_t i)
   if (load_mode == LOAD_DIRECT && (lpeek(SN + 2) & 2) == 0) {
     close(fd); status(2, "direct needs SDRAM at $8000000: /load N port"); return 0;
   }
-  if (load_mode == LOAD_DIRECT && lb + len > 0xC000000UL) {
-    close(fd); status(2, "past $C000000 (HyperRAM): the CPU can't see it there: /load N port");
-    return 0;
+  if (load_mode == LOAD_DIRECT && lb + len > 0xC800000UL) {
+    close(fd); status(2, "past the end of HyperRAM ($C800000)"); return 0;
   }
   lp_to(IMG, 1);
   for (;;) {
