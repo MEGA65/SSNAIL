@@ -20,11 +20,12 @@
     /tok TEXT    tokenize TEXT with the loaded image's tables, and back
     /step        one token: the script with n_generate = 1, and what it did
     /new         new story (context cleared)    /len N  reply length
+    /rows 25|50  the screen's height
   Then plain text chats.  While generating, any key stops after this token.
 */
 #include <stdint.h>
 #include <string.h>
-#include <stdio.h>
+#include <stdarg.h>
 #include <mega65/memory.h>
 #include <mega65/fileio.h>
 #include <mega65/dirent.h>
@@ -32,6 +33,60 @@
 #include "ssnail_tokc.h"
 
 void do_dma(void);              /* (mega65-libc's, not in its header) */
+
+/* A small sprintf of our own (the library's broke the screen here):
+   %s %c %u %X, with l, width, 0 and - flags and a precision for %s */
+static void fmt(char *o, const char *f, ...)
+{
+  va_list ap;
+  va_start(ap, f);
+  while (*f) {
+    char t[12], *q;
+    uint8_t left = 0, zero = 0, lng = 0, w = 0, prec = 255, n;
+    uint32_t v;
+    if (*f != '%') { *o++ = *f++; continue; }
+    f++;
+    if (*f == '-') { left = 1; f++; }
+    if (*f == '0') { zero = 1; f++; }
+    while (*f >= '0' && *f <= '9') w = w * 10 + (*f++ - '0');
+    if (*f == '.') { prec = 0; f++; while (*f >= '0' && *f <= '9') prec = prec * 10 + (*f++ - '0'); }
+    if (*f == 'l') { lng = 1; f++; }
+    if (*f == 's' || *f == 'c') {
+      const char *str;
+      char c1[2];
+      if (*f == 's') str = va_arg(ap, const char *);
+      else { c1[0] = (char)va_arg(ap, int); c1[1] = 0; str = c1; }
+      n = 0;
+      while (str[n] && n < prec) n++;
+      if (!left) while (w > n) { *o++ = ' '; w--; }
+      { uint8_t i; for (i = 0; i < n; i++) *o++ = str[i]; }
+      while (w > n) { *o++ = ' '; w--; }
+      f++;
+      continue;
+    }
+    v = lng ? va_arg(ap, uint32_t) : (uint16_t)va_arg(ap, unsigned int);
+    q = t + sizeof(t);
+    *--q = 0;
+    if (*f == 'X') { do { *--q = "0123456789ABCDEF"[v & 15]; v >>= 4; } while (v); }
+    else { do { *--q = '0' + (char)(v % 10); v /= 10; } while (v); }
+    n = (uint8_t)(t + sizeof(t) - 1 - q);
+    if (!left) while (w > n) { *o++ = zero ? '0' : ' '; w--; }
+    while (*q) *o++ = *q++;
+    while (w > n) { *o++ = ' '; w--; }
+    f++;
+  }
+  *o = 0;
+  va_end(ap);
+}
+#define sprintf fmt
+
+static uint32_t parse_u(const char *s)
+{
+  uint32_t v = 0;
+  while (*s == ' ') s++;
+  while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+  return v;
+}
 
 #define SN 0xFFD7500UL          /* SSNAIL's registers */
 #define D7FE 0xFFD37FEUL
@@ -75,8 +130,9 @@ static char buf[4 * 255 + 1];          /* a token's text, folded (one user at a 
 #define SCR 0x50000UL
 #define COL 0xFF80000UL
 #define TOP 3
-#define BOT 46                  /* last output row */
-#define INROW 48
+static uint8_t rows = 50;       /* 25 or 50 (/rows) */
+static uint8_t BOT = 46;        /* last output row */
+static uint8_t INROW = 48;      /* the input line (a rule above it) */
 static uint8_t ox, oy = TOP;
 
 static uint8_t sc(uint8_t c)    /* ASCII -> screen code (lower-case set) */
@@ -157,21 +213,25 @@ static void screen_setup(void)
 {
   POKE(0xD018, 0x16);           /* lower case */
   POKE(0xD054, 0x00);
-  POKE(0xD031, 0xE8);           /* H640, V400, fast CPU */
+  POKE(0xD031, rows == 50 ? 0xE8 : 0xE0);  /* H640, fast CPU (and V400: 50 rows) */
   POKE(0xD016, 0xC9);
   POKE(0xD058, 80); POKE(0xD059, 0);
   POKE(0xD05E, 80);
   POKE(0xD060, SCR & 0xFF); POKE(0xD061, (SCR >> 8) & 0xFF); POKE(0xD062, (SCR >> 16) & 0xFF);
   POKE(0xD063, (PEEK(0xD063) & 0xF0) | ((SCR >> 24) & 0x0F));
-  POKE(0xD07B, 50);
+  POKE(0xD07B, rows);
+  BOT = rows - 4;
+  INROW = rows - 2;
   POKE(0xD021, 0);
   POKE(0xD020, 8);
   lfill(SCR, ' ', 4000);
   lfill(COL, 1, 4000);
   POKE(0xD020, 4);
   put_at(0, 0, 7, "SSNAIL chat");
-  lfill(SCR + 47 * 80, 64 + 128, 80);   /* (a rule above the input line) */
-  lfill(COL + 47 * 80, 11, 80);
+  lfill(SCR + (INROW - 1) * 80, 64 + 128, 80);   /* (a rule above the input line) */
+  lfill(COL + (INROW - 1) * 80, 11, 80);
+  ox = 0;
+  oy = TOP;
 }
 
 /* --- SSNAIL ------------------------------------------------------------- */
@@ -538,9 +598,11 @@ static void cmd_found(void)
 {
   char m[90];
   uint8_t t = detect_target(), caps = lpeek(SN + 2);
+
   sprintf(m, "board: %s (target $%02X)", t == TARGET_MEGA65R6 ? "MEGA65 R6" : t == TARGET_MEGA65R5 ? "MEGA65 R5"
           : t == TARGET_MEGA65R4 ? "MEGA65 R4" : t == TARGET_MEGA65R3 ? "MEGA65 R3" : "other", t);
   say(3, m);
+
   sprintf(m, "SSNAIL v%u: HyperRAM port %s, SDRAM %s", lpeek(SN + 1),
           caps & 1 ? "yes" : "no", caps & 2 ? "PRESENT" : "not present");
   say(3, m);
@@ -709,10 +771,12 @@ int main(void)
   POKE(0xD020, 7);
   screen_setup();
 
-  while(1) continue;
-  
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
+
   cmd_found();
+
+  while(1) POKE(0xD020,PEEK(0xD012)); 
+   
   cmd_regs();
   out_newline();
   say(7, "/scan lists the models on the SD card (in /SSNAIL, else the root).");
@@ -720,6 +784,7 @@ int main(void)
   say(7, "Then /check, /tok TEXT and /step, one at a time; then type to chat.");
   say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
   status(7, "ready");
+  
   POKE(0xD020, 5);
   (void)d;
   for (;;) {
@@ -727,6 +792,11 @@ int main(void)
     if (line[0] == '/') {
       if (!strncmp(line, "/models", 7)) list_models();
       else if (!strncmp(line, "/regs", 5)) cmd_regs();
+      else if (!strncmp(line, "/rows", 5)) {
+        rows = parse_u(line + 5) == 25 ? 25 : 50;
+        screen_setup();
+        say(7, "screen cleared: /help lists the commands");
+      }
       else if (!strncmp(line, "/scan", 5)) {
         say(7, "scanning the SD card...");
         n_models = 0;
@@ -754,10 +824,9 @@ int main(void)
       else if (!strncmp(line, "/step", 5)) cmd_step();
       else if (!strncmp(line, "/new", 4)) { fresh = 1; status(5, "new story"); }
       else if (!strncmp(line, "/len ", 5)) {
-        unsigned long v = 0;
-        sscanf(line + 5, "%lu", &v);
+        uint32_t v = parse_u(line + 5);
         if (v) n_gen = v;
-      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /tok TEXT /step /new /len N");
+      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /tok TEXT /step /new /len N /rows 25|50");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }
