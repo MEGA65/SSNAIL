@@ -108,7 +108,7 @@ static uint32_t parse_u(const char *s)
 #define R_STOP_REQUEST 0x50
 #define R_STOP_REASON 0x54
 
-#define MAXMODELS 40
+#define MAXMODELS 64
 #define NAMELEN 64
 
 struct model {
@@ -203,7 +203,18 @@ static void out_text(const char *s)
   }
 }
 
+/* messages go inline, in the scrolling output; row 1 shows the loaded
+   model (and a load's progress) */
 static void status(uint8_t c, const char *s)
+{
+  uint8_t keep = colour;
+  colour = c;
+  out_text(s);
+  out_newline();
+  colour = keep;
+}
+
+static void row1(uint8_t c, const char *s)
 {
   clear_rows(1, 1);
   put_at(0, 1, c, s);
@@ -457,6 +468,7 @@ static uint8_t load(uint8_t i)
   struct model *m = &models[i];
   uint8_t fd;
   uint16_t n, first = 1;
+  uint8_t first_check = 1, hdr_ok = 0;
   uint32_t total = 0, len, lb;
   char msg[90];
   chdirroot();
@@ -484,9 +496,23 @@ static uint8_t load(uint8_t i)
       lp_send(sector, n);
     }
     total += n;
+    if (first_check) {                  /* the header, read back straight away */
+      first_check = 0;
+      hdr_ok = lpeek(IMG) == 'S' && lpeek(IMG + 1) == 'S' && lpeek(IMG + 2) == 'N'
+               && lpeek(IMG + 3) == 'L';
+      sprintf(msg, "header written: reads back %02X %02X %02X %02X (%s)", lpeek(IMG),
+              lpeek(IMG + 1), lpeek(IMG + 2), lpeek(IMG + 3), hdr_ok ? "right" : "WRONG");
+      status(hdr_ok ? 5 : 2, msg);
+    }
+    if (hdr_ok && lpeek(IMG) != 'S') {  /* ... and if it changes, when */
+      hdr_ok = 0;
+      sprintf(msg, "the header changed after %lu KB, writing at $%07lX", total >> 10,
+              load_mode == LOAD_DIRECT ? dst : 0);
+      status(2, msg);
+    }
     if ((total & 0x3FFFF) < 512 || total >= len) {
       sprintf(msg, "loading %s: %lu of %lu KB", m->name, total >> 10, len >> 10);
-      status(7, msg);
+      row1(7, msg);
     }
     if (total >= len) break;
     n = read512(sector);
@@ -499,8 +525,11 @@ static uint8_t load(uint8_t i)
   }
   cur = i;
   tok_init(IMG);
-  sprintf(msg, "%s: %s, %lu-token context", m->name, m->desc, rd32(IMG + H_MAXCTX));
-  status(5, msg);
+  sprintf(msg, "header at the end: %02X %02X %02X %02X", lpeek(IMG), lpeek(IMG + 1),
+          lpeek(IMG + 2), lpeek(IMG + 3));
+  status(lpeek(IMG) == 'S' ? 5 : 2, msg);
+  sprintf(msg, "%s: %s", m->name, m->desc);
+  row1(5, msg);
   return 1;
 }
 
@@ -695,6 +724,12 @@ static void cmd_check(void)
   say(bad_p | bad_d | bad_pp | bad_pd ? 2 : 5, m);
   if (first != 0xFFFF) {
     sprintf(m, "  first: +$%02X is $%02X, the file has $%02X", first, lpeek(IMG + first), sector[first]);
+    say(2, m);
+    sprintf(m, "  RAM:  ");
+    for (i = 0; i < 16; i++) sprintf(m + 8 + 3 * i, "%02X ", lpeek(IMG + i));
+    say(2, m);
+    sprintf(m, "  file: ");
+    for (i = 0; i < 16; i++) sprintf(m + 8 + 3 * i, "%02X ", sector[i]);
     say(2, m);
   }
 }
