@@ -285,14 +285,21 @@ class Machine:
         try:
             if op == I.FINDCELL:
                 if a != I.RZERO:
-                    self.R[a] = SH.find_cell(self, desc, self.reg(a) & 0xFFFF, self.reg(b) & 0xFFFF)
+                    self.R[a] = SH.find_cell(self, desc, self.reg(a), self.reg(b))
             elif op == I.REBALANCE:
-                SH.rebalance_row(self, desc, self.reg(a) & 0xFFFF, self.reg(b) & 0xFFFF)
+                SH.rebalance_row(self, desc, self.reg(a), self.reg(b))
+            elif op == I.RECALC:
+                c = self.read(self.pc, 16)[3]               # (the c byte: column registers)
+                z = struct.unpack("<I", self.read(self.pc + 12, 4))[0]
+                n = SH.recalc(self, desc, self.reg(a), self.reg(b), self.reg(c & 15), self.reg(c >> 4),
+                              begin=bool(z & 1), end=bool(z & 2))
+                if a != I.RZERO:
+                    self.R[a] = n
             else:
                 raise SsnailError(f"SHITE op ${op:02X} not in this model yet")
         except SH.ShiteFormatError as e:
             if self.read(desc, 4) == SH.MAGIC:
-                SH.put16(self, desc + SH.D_BADROW, e.row)
+                SH.put32(self, desc + SH.D_BADROW, e.row)
             raise SsnailError(f"ERR_FORMAT: {e}")
 
     def recent_tokens(self, n):

@@ -32,22 +32,24 @@ def tree(m, b):
     def walk(g):
         if not g:
             return [], 0
-        c = b + 16 * g
-        l, hl = walk(SH.u16(m, c + 4))
-        r, hr = walk(SH.u16(m, c + 6))
-        return l + [SH.u16(m, c)] + r, 1 + max(hl, hr)
+        h = m.read(b + 16 * g, 8)
+        lg, rg = SH.hdr_links(h)
+        l, hl = walk(lg)
+        r, hr = walk(rg)
+        return l + [SH.hdr_col(h)] + r, 1 + max(hl, hr)
     return walk(SH.u16(m, b + SH.R_ROOT))
 
 
 rng = np.random.default_rng(5)
 m = Mem()
-sh = SH.Sheet(40, 300)
+sh = SH.Sheet(40, 1 << 24)
 want = {}
 for r in range(40):
     if r % 7 == 3:
         continue                                   # some empty rows
     n = int(rng.integers(0, 60))
     cols = rng.choice(300, size=n, replace=False)  # any order
+    cols = [int(c) if c % 5 else int(c) << 12 | int(c) for c in cols]   # some past 64K
     for i, c in enumerate(cols):
         c = int(c)
         if i % 9 == 4:
@@ -74,8 +76,8 @@ for r in range(40):
     good &= cols == sorted(cols) and n == len(cols) and h == (n.bit_length() if n else 0)
     good &= SH.u16(m, b + SH.R_FLAGS) & SH.ROW_STALE == 0
 check(good, "REBALANCE_ROW: every row's tree in column order, all cells, minimal height, not stale")
-found = all(SH.u16(m, SH.find_cell(m, desc, r, c)) == c for (r, c) in want)
-miss = all(SH.find_cell(m, desc, r, c) == 0 for r in range(40) for c in (300, 301, 65535)
+found = all(SH.hdr_col(m.read(SH.find_cell(m, desc, r, c), 8)) == c for (r, c) in want)
+miss = all(SH.find_cell(m, desc, r, c) == 0 for r in range(40) for c in (300, 301, 65535, (1 << 24) - 1)
            if True) and all(SH.find_cell(m, desc, r, c) == 0
                             for r in range(40) for c in range(0, 300, 7) if (r, c) not in want)
 check(found and miss, f"FIND_CELL finds all {len(want)} cells and nothing else")
@@ -116,7 +118,7 @@ except SH.ShiteFormatError as e:
     bad = e.row
 check(bad == 2, "two cells in one column: a format error, row 2")
 b3 = SH.Descriptor(m3, d3).row_block(2)
-m3.write(b3 + 16 + 3, bytes([0]))
+m3.write(b3 + 16 + 4, bytes([0]))
 try:
     SH.rebalance_row(m3, d3, 0, 3); bad = None
 except SH.ShiteFormatError as e:
