@@ -257,9 +257,21 @@ static uint32_t rd32(uint32_t a)
          | ((uint32_t)lpeek(a + 3) << 24);
 }
 
+/* A DMA's address does not carry into its megabyte (it wraps within 1 MB),
+   so a transfer that would cross a 1 MB boundary is done in two */
+static uint16_t mb_room(uint32_t a, uint16_t n)
+{
+  uint32_t left = 0x100000UL - (a & 0xFFFFFUL);
+  return left < n ? (uint16_t)left : n;
+}
+
 void tm_read(uint32_t a, uint8_t *dst, uint8_t n)
 {
-  if (n) lcopy(a, (uint32_t)(uint16_t)dst, n);
+  while (n) {
+    uint8_t k = (uint8_t)mb_room(a, n);
+    lcopy(a, (uint32_t)(uint16_t)dst, k);
+    a += k; dst += k; n -= k;
+  }
 }
 
 /* The CPU sees SSNAIL's $8000000 RAM (SDRAM on R4-R6) at $8000000, with its
@@ -339,6 +351,17 @@ static void lp_write32(uint32_t a, uint32_t v)
 }
 
 static uint8_t busy(void) { return lpeek(SN + 4) & 1; }
+
+/* a flicker of thin white lines in the border while something is happening */
+static void flick(void) { POKE(0xD020, 1); POKE(0xD020, 0); }
+
+static uint8_t image_there(void)
+{
+  if (lpeek(IMG) == 'S' && lpeek(IMG + 1) == 'S' && lpeek(IMG + 2) == 'N' && lpeek(IMG + 3) == 'L')
+    return 1;
+  status(2, "no image header (SSNL) at $8000000: /load the model again");
+  return 0;
+}
 
 static void go(uint32_t pc)
 {
@@ -438,7 +461,7 @@ static void direct(const uint8_t *src, uint16_t n)
 {
   uint8_t d7 = lpeek(D7FE);
   while (n) {
-    uint16_t k = n;
+    uint16_t k = mb_room(dst, n);
     if (dst < 0xC000000UL) {
       if (dst + k > 0xC000000UL) k = 0xC000000UL - dst;
       lpoke(D7FE, d7 | 0x10);
@@ -515,10 +538,12 @@ static uint8_t load(uint8_t i)
       row1(7, msg);
     }
     if (total >= len) break;
+    flick();
     n = read512(sector);
     if (!n) break;
   }
   close(fd);
+  POKE(0xD020, 5);
   if (load_mode != LOAD_DIRECT) {
     lp_commit(lb, 0);                   /* (flush) */
     if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
@@ -548,6 +573,8 @@ static void reply(const char *text)
   char msg[80];
   static uint8_t piece[255];
 
+  if (!image_there()) return;
+
   n = tok_encode(text, fresh, ids, MAXIN + 2);
   at = fresh ? 0 : pos + 1;
   if (at + n + 1 >= ctx) { status(2, "context full: /new starts again"); return; }
@@ -574,12 +601,20 @@ static void reply(const char *text)
       got++;
     }
     if (!b) break;
-    if (!stop_sent && PEEK(0xD610)) {   /* a key: stop after this token */
+    flick();
+    if (PEEK(0xD610)) {                 /* a key: stop after this token; */
       POKE(0xD610, 0);
-      lp_write32(IMG + R_STOP_REQUEST, 1);
-      stop_sent = 1;
+      if (!stop_sent) {
+        lp_write32(IMG + R_STOP_REQUEST, 1);
+        stop_sent = 1;
+        status(7, "(stopping after this token: a key again aborts)");
+      } else {                          /* a second: abort SSNAIL */
+        lpoke(SN + 3, 2);
+        status(2, "aborted");
+      }
     }
   }
+  POKE(0xD020, 5);
   colour = 1;
   out_newline();
   pos = rd32(IMG + R_POS);
@@ -766,6 +801,7 @@ static void cmd_step(void)
   char m[90];
   static uint8_t piece[255];
   if (cur < 0) { say(2, "nothing loaded"); return; }
+  if (!image_there()) return;
   tokens = rd32(IMG + H_TOKENS);
   n = tok_encode("Once", 1, ids, 8);
   for (i = 0; i < n; i++) lp_write32(tokens + 4 * i, ids[i]);
@@ -777,7 +813,9 @@ static void cmd_step(void)
           n, tokens, rd32(IMG + R_POS), rd32(IMG + R_PROMPT_LEN), rd32(IMG + R_N_GENERATE));
   say(3, m);
   go(rd32(IMG + H_CODE));
-  while (busy() && ++spins < 3000000UL) ;
+  while (busy() && ++spins < 300000UL) flick();
+  POKE(0xD020, 5);
+  if (busy()) { lpoke(SN + 3, 2); say(2, "still busy: aborted"); }
   sprintf(m, "after %lu polls: status $%02X error %u PC $%07lX; generated %lu, stop reason %lu, pos %lu",
           spins, lpeek(SN + 4), lpeek(SN + 5), rd32(SN + 12) & 0xFFFFFFFUL,
           rd32(IMG + R_GENERATED), rd32(IMG + R_STOP_REASON), rd32(IMG + R_POS));
