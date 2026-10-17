@@ -259,6 +259,13 @@ class Machine:
             elif op == I.VCVTI16:
                 s = np.frombuffer(struct.pack("<I", N2 & 0xFFFFFFFF), dtype="<f4")[0]
                 self.write(self.ea(z), H.cvti16(self.f32v(self.ea(x), N0), s).astype("<i2").tobytes())
+            elif op == I.VSUB:
+                p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
+                self.put_f32v(self.ea(z), (p - q).astype(np.float32))
+            elif op == I.VPROJ16:
+                f = lambda v: np.frombuffer(struct.pack("<I", v & 0xFFFFFFFF), dtype="<f4")[0]
+                p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
+                self.write(self.ea(z), H.vproj16(p, q, f(N2), f(N1)).astype("<i2").tobytes())
             elif op in (I.VMAX, I.VMIN):
                 p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
                 self.put_f32v(self.ea(z), H.vmax(p, q) if op == I.VMAX else H.vmin(p, q))

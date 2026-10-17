@@ -71,6 +71,9 @@ VCVTI16 = 0x2F  # Z (N0 x int16) = roundf(X * s), saturated to int16; s = N2 as
                 # f32 bits; roundf: half away from zero; NaN gives 0
 VMAX = 0x30     # Z = Y where X < Y, else X (N0 f32; -0 = +0 compare equal)
 VMIN = 0x31     # Z = Y where Y < X, else X
+VSUB = 0x32     # Z = X - Y (N0 f32)
+VPROJ16 = 0x33  # Z (N0 x int16) = sat(roundf(X / Y * s + o)), each step F32;
+                # s = N2, o = N1 as f32 bits (x / w to screen coordinates)
 
 OPNAMES = {v: k for k, v in dict(
     NOP=NOP, HALT=HALT, SYNC=SYNC, COPY=COPY, SETN=SETN, LI=LI, LDR=LDR,
@@ -78,7 +81,8 @@ OPNAMES = {v: k for k, v in dict(
     DEQROW=DEQROW, ARGMAX=ARGMAX, VADD=VADD, VMUL=VMUL, RMSNORM=RMSNORM,
     SILUMUL=SILUMUL, ROPE=ROPE, ATTN=ATTN, LAYERNORM=LAYERNORM, GELU=GELU,
     MEANROWS=MEANROWS, CVT16=CVT16, VEXP=VEXP, SOFTPLUS=SOFTPLUS, SSMUPD=SSMUPD,
-    VRECIP=VRECIP, VCVTI16=VCVTI16, VMAX=VMAX, VMIN=VMIN).items()}
+    VRECIP=VRECIP, VCVTI16=VCVTI16, VMAX=VMAX, VMIN=VMIN, VSUB=VSUB,
+    VPROJ16=VPROJ16).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
 GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)

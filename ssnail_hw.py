@@ -427,6 +427,16 @@ def cvti16(x, s):
     return r.astype(np.int16)
 
 
+def vproj16(x, w, s, o):
+    """int16 sat(roundf(F32(F32(F32(x / w) * s) + o))): the divider, a
+    multiply and an add, each rounded, then VCVTI16's conversion."""
+    x, w = np.asarray(x, dtype=F32), np.asarray(w, dtype=F32)
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        t = ((x / w).astype(F32) * F32(s)).astype(F32)
+        t = (t + F32(o)).astype(F32)
+    return cvti16(t, 1.0)
+
+
 def flt(a, b):
     """The hardware's F32 a < b, on the bits: -0 = +0; sign, then magnitude
     (so NaNs order by their bits, unlike IEEE)."""

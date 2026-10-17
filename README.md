@@ -378,6 +378,8 @@ N0–N2 (lengths, set by SETN).
 | $2F | VCVTI16 | Z (N0 × int16) = roundf(X · s), saturated, with s = N2 as f32 bits (roundf: half away from zero; NaN gives 0): screen coordinates |
 | $30 | VMAX | Z = Y where X < Y, else X (N0 f32; −0 and +0 compare equal) |
 | $31 | VMIN | Z = Y where Y < X, else X |
+| $32 | VSUB | Z = X − Y (N0 f32) |
+| $33 | VPROJ16 | Z (N0 × int16) = sat(roundf(X / Y · s + o)), each step rounded to f32; s = N2, o = N1 as f32 bits: x / w straight to screen coordinates |
 
 GEMV flag `b` bit 1 writes y as F16 instead of F32.  The ATTN parameter
 block's sixth word is the KV cache format: 0 F32, 1 F16.
