@@ -543,7 +543,7 @@ static uint8_t load(uint8_t i)
     if (!n) break;
   }
   close(fd);
-  POKE(0xD020, 5);
+  POKE(0xD020, 0);
   if (load_mode != LOAD_DIRECT) {
     lp_commit(lb, 0);                   /* (flush) */
     if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
@@ -614,7 +614,7 @@ static void reply(const char *text)
       }
     }
   }
-  POKE(0xD020, 5);
+  POKE(0xD020, 0);
   colour = 1;
   out_newline();
   pos = rd32(IMG + R_POS);
@@ -808,7 +808,7 @@ static void cmd_verify(void)
     flick();
   }
   close(fd);
-  POKE(0xD020, 5);
+  POKE(0xD020, 0);
   if (!bad) { sprintf(m, "all %lu bytes match the file", off); say(5, m); }
   else { sprintf(m, "%lu chunks differ; the first at $%07lX", bad, first_bad); say(2, m); }
 }
@@ -858,7 +858,7 @@ static void cmd_step(void)
   say(3, m);
   go(rd32(IMG + H_CODE));
   while (busy() && ++spins < 300000UL) flick();
-  POKE(0xD020, 5);
+  POKE(0xD020, 0);
   if (busy()) { lpoke(SN + 3, 2); say(2, "still busy: aborted"); }
   sprintf(m, "after %lu polls: status $%02X error %u PC $%07lX; generated %lu, stop reason %lu, pos %lu",
           spins, lpeek(SN + 4), lpeek(SN + 5), rd32(SN + 12) & 0xFFFFFFFUL,
@@ -884,7 +884,7 @@ int main(void)
      hypervisor): its interrupt would otherwise run, and touch VIC and
      colour RAM, 60 times a second */
   /* (the border shows how far start-up got: red, yellow, orange, purple,
-     then green once waiting for input) */
+     then black once waiting for input) */
   POKE(0xD020, 2);
   __asm__ volatile("sei");
   mega65_io_enable();
@@ -903,7 +903,7 @@ int main(void)
   say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
   status(7, "ready");
   
-  POKE(0xD020, 5);
+  POKE(0xD020, 0);
   (void)d;
   for (;;) {
     read_line(line, sizeof(line));
