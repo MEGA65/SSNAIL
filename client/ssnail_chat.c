@@ -6,10 +6,17 @@
   token is printed as it arrives.  The protocol is the README's "Running a
   generation"; the tokenizer's reference is ssnail_tok.py.
 
-  Commands:  /models   list them      /load N   load model N
-             /new      new story (context cleared)
-             /len N    tokens to generate per reply (default 120)
-  While generating, any key stops after the current token.
+  Nothing happens until asked, one step at a time:
+    /regs        SSNAIL's registers, and $D7FE
+    /scan        find the models on the SD card (/models lists them again)
+    /hdr N       model N's header fields, from the file
+    /load N      load it (DMA into the load port); /load N slow: byte by byte
+    /check       the loaded header and first payload bytes read back from
+                 $8000000 (by lpeek and by DMA), against the file
+    /tok TEXT    tokenize TEXT with the loaded image's tables, and back
+    /step        one token: the script with n_generate = 1, and what it did
+    /new         new story (context cleared)    /len N  reply length
+  Then plain text chats.  While generating, any key stops after this token.
 */
 #include <stdint.h>
 #include <string.h>
@@ -220,6 +227,14 @@ static void lp_dma(const uint8_t *src, uint16_t n)
   do_dma();
 }
 
+/* the same, byte by byte through the CPU (no DMA): slow but plain */
+static void lp_bytes(const uint8_t *src, uint16_t n)
+{
+  uint16_t i;
+  lp_wait();
+  for (i = 0; i < n; i++) lpoke(SN + 0x18, src[i]);
+}
+
 static uint8_t lp_error(void) { lp_wait(); return lpeek(SN + 0x17) & 0x40; }
 
 /* bytes into SSNAIL's RAM through the load port (and flushed) */
@@ -325,6 +340,12 @@ static void list_models(void)
 
 /* stream the file: the 256-byte header to $8000000, the rest to the load
    base (H_LOAD_BASE), one sector at a time by DMA */
+static uint8_t slow_load;
+static void lp_send(const uint8_t *src, uint16_t n)
+{
+  if (slow_load) lp_bytes(src, n); else lp_dma(src, n);
+}
+
 static uint8_t load(uint8_t i)
 {
   struct model *m = &models[i];
@@ -343,12 +364,12 @@ static uint8_t load(uint8_t i)
   lp_commit(IMG, 1);
   for (;;) {
     if (first) {
-      lp_dma(sector, 256);
+      lp_send(sector, 256);
       lp_commit(lb, 0);
-      lp_dma(sector + 256, n - 256);
+      lp_send(sector + 256, n - 256);
       first = 0;
     } else {
-      lp_dma(sector, n);
+      lp_send(sector, n);
     }
     total += n;
     if ((total & 0x3FFFF) < 512 || total >= len) {
@@ -362,8 +383,8 @@ static uint8_t load(uint8_t i)
   close(fd);
   lp_commit(lb, 0);                     /* (flush) */
   if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
-  tok_init(IMG);
   cur = i;
+  tok_init(IMG);
   sprintf(msg, "%s: %s, %lu-token context", m->name, m->desc, rd32(IMG + H_MAXCTX));
   status(5, msg);
   return 1;
@@ -460,24 +481,148 @@ static void read_line(char *buf, uint8_t max)
   buf[n] = 0;
 }
 
-static int8_t default_model(void)
+
+/* --- step-by-step checks ------------------------------------------- */
+static void say(uint8_t c, const char *s) { colour = c; out_str(s); out_newline(); colour = 1; }
+
+static void cmd_regs(void)
 {
-  uint8_t fd, i;
-  int8_t best = -1;
+  char m[90];
+  uint8_t i;
+  sprintf(m, "SSNAIL id $%02X version %u caps $%02X  status $%02X error %u  PC $%07lX",
+          lpeek(SN), lpeek(SN + 1), lpeek(SN + 2), lpeek(SN + 4), lpeek(SN + 5),
+          rd32(SN + 12) & 0xFFFFFFFUL);
+  say(3, m);
+  sprintf(m, "regions: HyperRAM %u MB at $%02X0 0000, SDRAM %u MB at $%02X0 0000;"
+          "  load port $%02X  $D7FE = $%02X",
+          lpeek(SN + 0x10), lpeek(SN + 0x13), lpeek(SN + 0x12), lpeek(SN + 0x11),
+          lpeek(SN + 0x17), lpeek(D7FE));
+  say(3, m);
+  (void)i;
+}
+
+static uint8_t pick(const char *s)
+{
+  int k = 0;
+  while (*s == ' ') s++;
+  while (*s >= '0' && *s <= '9') k = k * 10 + (*s++ - '0');
+  if (k < 1 || k > n_models) { say(2, "no such model: /scan lists them"); return 0xFF; }
+  return k - 1;
+}
+
+static uint8_t read_header(uint8_t i)
+{
+  uint8_t fd;
   chdirroot();
-  if (chdir("SSNAIL") != 0xFF && (fd = open("config.txt")) != 0xFF) {
-    uint16_t n = read512(sector);
-    close(fd);
-    for (i = 0; i < n && sector[i] != '\r' && sector[i] != '\n'; i++) ;
-    sector[i] = 0;
-    for (i = 0; i < n_models; i++)
-      if (!strcmp(models[i].name, (char *)sector)) return i;
+  if (models[i].in_dir) chdir("SSNAIL");
+  fd = open(models[i].name);
+  if (fd == 0xFF) { say(2, "can't open the file"); return 0; }
+  read512(sector);
+  close(fd);
+  return 1;
+}
+
+static void cmd_hdr(uint8_t i)
+{
+  char m[90];
+  if (!read_header(i)) return;
+  sprintf(m, "%s: magic %c%c%c%c  arch %u  code $%07lX  tokens $%07lX  vocab $%07lX",
+          models[i].name, sector[0], sector[1], sector[2], sector[3], sector[H_ARCH],
+          le32(sector + H_CODE), le32(sector + H_TOKENS), le32(sector + 0x18));
+  say(3, m);
+  sprintf(m, "  load base $%07lX  payload %lu bytes  memory to $%07lX  context %lu  tokenizer $%07lX",
+          le32(sector + H_LOAD_BASE), le32(sector + H_PAYLOAD_LEN),
+          IMG + le32(sector + H_MEM_NEEDED), le32(sector + H_MAXCTX), le32(sector + 0x78));
+  say(3, m);
+}
+
+/* the image as loaded, read back two ways, against the file's first sector */
+static void cmd_check(void)
+{
+  static uint8_t dm[256];
+  char m[90];
+  uint16_t i, bad_p = 0, bad_d = 0, bad_pp = 0, bad_pd = 0, first = 0xFFFF;
+  uint32_t lb;
+  if (cur < 0) { say(2, "nothing loaded"); return; }
+  if (!read_header(cur)) return;
+  lb = le32(sector + H_LOAD_BASE);
+  lcopy(IMG, (uint32_t)(uint16_t)dm, 256);
+  for (i = 0; i < 256; i++) {
+    if (lpeek(IMG + i) != sector[i]) { bad_p++; if (first == 0xFFFF) first = i; }
+    if (dm[i] != sector[i]) bad_d++;
   }
-  for (i = 0; i < n_models; i++)        /* else the largest decoder that fits */
-    if (models[i].arch != 2 && models[i].mem <= avail
-        && (best < 0 || models[i].mem > models[best].mem))
-      best = i;
-  return best;
+  lcopy(lb, (uint32_t)(uint16_t)dm, 256);
+  for (i = 0; i < 256; i++) {
+    if (lpeek(lb + i) != sector[256 + i]) bad_pp++;
+    if (dm[i] != sector[256 + i]) bad_pd++;
+  }
+  sprintf(m, "header: %u bytes differ by lpeek, %u by DMA; payload's first 256: %u by lpeek, %u by DMA",
+          bad_p, bad_d, bad_pp, bad_pd);
+  say(bad_p | bad_d | bad_pp | bad_pd ? 2 : 5, m);
+  if (first != 0xFFFF) {
+    sprintf(m, "  first: +$%02X is $%02X, the file has $%02X", first, lpeek(IMG + first), sector[first]);
+    say(2, m);
+  }
+}
+
+static void cmd_tok(const char *text)
+{
+  static uint32_t t[64];
+  static uint8_t piece[255];
+  char m[90], buf[4 * 255 + 1];
+  uint16_t n, i;
+  if (cur < 0) { say(2, "nothing loaded"); return; }
+  n = tok_encode(text, 1, t, 64);
+  colour = 3;
+  for (i = 0; i < n; i++) { sprintf(m, "%lu ", t[i]); out_str(m); }
+  out_newline();
+  fold_reset();
+  for (i = 0; i < n; i++) {
+    uint8_t l = tok_piece(t[i], piece);
+    fold_feed(piece, l, buf);
+    out_char('[');
+    out_str(buf);
+    out_char(']');
+  }
+  out_newline();
+  colour = 1;
+}
+
+/* one token, watched: prompt "Once", n_generate = 1 */
+static void cmd_step(void)
+{
+  uint32_t tokens, t;
+  uint16_t n, i;
+  uint32_t spins = 0;
+  char m[90], buf[4 * 255 + 1];
+  static uint8_t piece[255];
+  if (cur < 0) { say(2, "nothing loaded"); return; }
+  tokens = rd32(IMG + H_TOKENS);
+  n = tok_encode("Once", 1, ids, 8);
+  for (i = 0; i < n; i++) lp_write32(tokens + 4 * i, ids[i]);
+  lp_write32(IMG + R_POS, 0);
+  lp_write32(IMG + R_PROMPT_LEN, n);
+  lp_write32(IMG + R_N_GENERATE, 1);
+  lp_write32(IMG + R_STOP_REQUEST, 0);
+  sprintf(m, "prompt: %u tokens at $%07lX; runtime block reads back pos %lu, prompt_len %lu, n_generate %lu",
+          n, tokens, rd32(IMG + R_POS), rd32(IMG + R_PROMPT_LEN), rd32(IMG + R_N_GENERATE));
+  say(3, m);
+  go(rd32(IMG + H_CODE));
+  while (busy() && ++spins < 3000000UL) ;
+  sprintf(m, "after %lu polls: status $%02X error %u PC $%07lX; generated %lu, stop reason %lu, pos %lu",
+          spins, lpeek(SN + 4), lpeek(SN + 5), rd32(SN + 12) & 0xFFFFFFFUL,
+          rd32(IMG + R_GENERATED), rd32(IMG + R_STOP_REASON), rd32(IMG + R_POS));
+  say(busy() || lpeek(SN + 5) ? 2 : 5, m);
+  if (rd32(IMG + R_GENERATED)) {
+    uint8_t l;
+    t = rd32(tokens + 4 * n);
+    l = tok_piece(t, piece);
+    fold_reset();
+    fold_feed(piece, l, buf);
+    sprintf(m, "token %lu: [", t);
+    colour = 3; out_str(m); out_str(buf); out_str("]"); out_newline(); colour = 1;
+  }
+  fresh = 1;
 }
 
 int main(void)
@@ -487,30 +632,43 @@ int main(void)
   mega65_io_enable();
   screen_setup();
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
-  status(7, "scanning the SD card for models...");
-  scan(1);
-  if (!n_models) scan(0);               /* (chdir can't tell us /SSNAIL is missing) */
-  inspect();
-  if (!n_models) { status(2, "no .ssnail files in /SSNAIL or the root"); for (;;) ; }
-  list_models();
-  d = default_model();
-  if (d >= 0) load(d);
-  else status(2, "no model fits: /load N");
+  cmd_regs();
+  status(7, "step by step: /regs /scan /hdr N /load N [slow] /check /tok TEXT /step");
+  (void)d;
   for (;;) {
     read_line(line, sizeof(line));
     if (line[0] == '/') {
       if (!strncmp(line, "/models", 7)) list_models();
-      else if (!strncmp(line, "/load ", 6)) {
-        int k = 0;
-        sscanf(line + 6, "%d", &k);
-        if (k >= 1 && k <= n_models && models[k - 1].mem <= avail) { load(k - 1); fresh = 1; }
-        else status(2, "no such model (or too big)");
-      } else if (!strncmp(line, "/new", 4)) { fresh = 1; status(5, "new story"); }
+      else if (!strncmp(line, "/regs", 5)) cmd_regs();
+      else if (!strncmp(line, "/scan", 5)) {
+        say(7, "scanning the SD card...");
+        n_models = 0;
+        scan(1);
+        if (!n_models) scan(0);         /* (chdir can't tell us /SSNAIL is missing) */
+        inspect();
+        if (!n_models) say(2, "no .ssnail files in /SSNAIL or the root");
+        else list_models();
+      } else if (!strncmp(line, "/hdr ", 5)) {
+        uint8_t k = pick(line + 5);
+        if (k != 0xFF) cmd_hdr(k);
+      } else if (!strncmp(line, "/load ", 6)) {
+        uint8_t k = pick(line + 6);
+        slow_load = strstr(line, "slow") != 0;
+        if (k != 0xFF && models[k].mem > avail) say(2, "too big for this board's RAM");
+        else if (k != 0xFF) {
+          say(7, slow_load ? "loading byte by byte..." : "loading by DMA...");
+          if (load(k)) say(5, "loaded: /check next");
+          fresh = 1;
+        }
+      } else if (!strncmp(line, "/check", 6)) cmd_check();
+      else if (!strncmp(line, "/tok ", 5)) cmd_tok(line + 5);
+      else if (!strncmp(line, "/step", 5)) cmd_step();
+      else if (!strncmp(line, "/new", 4)) { fresh = 1; status(5, "new story"); }
       else if (!strncmp(line, "/len ", 5)) {
         unsigned long v = 0;
         sscanf(line + 5, "%lu", &v);
         if (v) n_gen = v;
-      } else status(2, "commands: /models  /load N  /new  /len N");
+      } else status(2, "/regs /scan /models /hdr N /load N [slow] /check /tok TEXT /step /new /len N");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }
