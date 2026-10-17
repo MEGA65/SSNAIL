@@ -299,7 +299,9 @@ static uint8_t ssnail_setup(void)
   lpoke(SN + 0x11, sd ? 0x80 : 0);
   lpoke(SN + 0x12, sd ? 64 : 0);
   lpoke(SN + 0x13, sd ? 0xC0 : 0x80);
-  lpoke(D7FE, (lpeek(D7FE) & 0xE2) | (sd ? 0x10 : 0));
+  /* low nibble $D: the CPU's SDRAM caching (prefetch, line reads,
+     advance) on; bit 4 picks SDRAM at $8000000 */
+  lpoke(D7FE, (lpeek(D7FE) & 0xE0) | 0x0D | (sd ? 0x10 : 0));
   avail = sd ? 72UL << 20 : 8UL << 20;
   return 1;
 }

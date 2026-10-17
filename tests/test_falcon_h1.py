@@ -47,14 +47,8 @@ if hf is not None:
 with tempfile.TemporaryDirectory() as tmp:
     img = C.convert(m, 64, "q8_0", I.FMT_Q8_0, 120, verbose=False, kv="f32")
     mach = S.Machine(img)
-    toks = S.header(mach, I.H_TOKENS) - I.HYPERRAM_BASE
-    for i, t in enumerate(ids):
-        mach.mem[toks + 4 * i: toks + 4 * i + 4] = struct.pack("<I", t)
-    S.set_rt(mach, I.R_POS, 0); S.set_rt(mach, I.R_PROMPT_LEN, len(ids))
-    S.set_rt(mach, I.R_N_GENERATE, 1); S.set_rt(mach, I.R_STOP_REQUEST, 0)
-    got = []
-    mach.on_argmax = lambda v: got.append(v.copy()); mach.temperature = 0.0
-    mach.run(S.header(mach, I.H_CODE))
+    mach.temperature = 0.0
+    got = S.prompt_logits(mach, ids)
 ref = FalconH1Ref(GGUF)
 for n, w in list(ref.W.items()):
     if w.ndim == 2 and min(w.shape) > 1 and "conv1d" not in n:

@@ -773,6 +773,13 @@ def emit_sample(A, b, logits, vocab, noise):
     A.label("greedy")
 
 
+def skip_head_in_prompt(A):
+    """Before the final norm: a prompt token but the last only advances (no
+    output layer, sampling or ARGMAX: nothing reads its logits)."""
+    A(I.ADDI, R_POS1, R_POS, z=1)
+    A(I.BLT, R_POS1, R_PLEN, "advance")     # still inside the prompt
+
+
 def decoder_epilogue(A, tokens_addr):
     """After ARGMAX into R_NEXT: write the token, count, stop checks, loop."""
     A(I.ADDI, R_POS1, R_POS, z=1)
@@ -878,6 +885,7 @@ def build_llama(b):
         A(I.SILUMUL, x=hb, y=hb2, z=hb)
         A(I.SETN, x=hidden, y=dim)
         A(I.GEMV, W["w2"][0], I.GEMV_ACC, x=W["w2"][1], y=hb, z=x)
+    skip_head_in_prompt(A)
     A(I.SETN, x=dim, z=eps)
     A(I.RMSNORM, x=x, y=out_norm, z=xb)
     A(I.SETN, x=dim, y=vocab)
@@ -1073,6 +1081,7 @@ def build_falcon_h1(b):
         A(I.SILUMUL, x=hb, y=hb2, z=hb)
         A(I.SETN, x=hidden, y=dim)
         A(I.GEMV, W["w2"][0], I.GEMV_ACC, x=W["w2"][1], y=hb, z=x)
+    skip_head_in_prompt(A)
     A(I.SETN, x=dim, z=eps)
     A(I.RMSNORM, x=x, y=out_norm, z=xb)
     A(I.SETN, x=dim, y=vocab)
@@ -1161,6 +1170,7 @@ def build_gpt2(b):
         A(I.GEMV, W["wdn"][0], I.GEMV_ACC, x=W["wdn"][1], y=hb, z=x)
         A(I.SETN, x=dim)
         A(I.VADD, x=x, y=W["bdn"], z=x)
+    skip_head_in_prompt(A)
     A(I.SETN, x=dim, z=eps)
     A(I.LAYERNORM, x=x, y=lnf, z=xb)
     A(I.SETN, x=dim, y=vocab)

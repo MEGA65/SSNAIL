@@ -177,7 +177,9 @@ def gpt2_case(name, wtype, tied=True):
         prompt = C.encode(model, "once upon a time the cat")
         gen, reason = S.generate(m, prompt, 10)
         ref = ref_gpt2(g, prompt + gen)
-        sim = np.array(seen)
+        # (the prompt's logits, but its last, one position at a time: a run
+        # computes them only from the prompt's last token on)
+        sim = np.vstack([S.prompt_logits(S.Machine(image), prompt)[:-1], np.array(seen)])
         err = np.max(np.abs(sim - ref[:len(sim)])) / np.max(np.abs(ref))
         tok_ok = list(np.argmax(ref[len(prompt) - 1:len(sim)], axis=1)) == gen
         words = [model.field("tokenizer.ggml.tokens")[i] for i in prompt]

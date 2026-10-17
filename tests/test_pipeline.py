@@ -170,7 +170,9 @@ def run_case(name, wtype, conv_wtype="keep", tied=False, tol=2e-3, need_exact_to
         gen, reason = S.generate(m, prompt, 12)
         seq = prompt + gen
         ref = Reference(g).logits(seq)
-        sim = np.array(seen)
+        # (the prompt's logits, but its last, one position at a time: a run
+        # computes them only from the prompt's last token on)
+        sim = np.vstack([S.prompt_logits(S.Machine(image), prompt)[:-1], np.array(seen)])
         n = len(sim)
         err = np.max(np.abs(sim - ref[:n])) / np.max(np.abs(ref[:n]))
         ref_next = list(np.argmax(ref[len(prompt) - 1:n], axis=1))

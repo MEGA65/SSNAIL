@@ -426,6 +426,31 @@ def generate(m, prompt, n_generate):
     return out, header(m, I.R_STOP_REASON)
 
 
+def prompt_logits(m, prompt):
+    """A decoder's logits at every position of prompt (an array, one row per
+    token), one position at a time: the image skips the output layer for all
+    but a prompt's last token, so each run's prompt ends at that position."""
+    tokens = header(m, I.H_TOKENS) - I.HYPERRAM_BASE
+    for i, t in enumerate(prompt):
+        m.mem[tokens + 4 * i: tokens + 4 * i + 4] = struct.pack("<I", t)
+    seen, keep = [], m.on_argmax
+    m.on_argmax = seen.append
+    try:
+        for i in range(len(prompt)):
+            set_rt(m, I.R_POS, i)
+            set_rt(m, I.R_PROMPT_LEN, i + 1)
+            set_rt(m, I.R_N_GENERATE, 1)
+            set_rt(m, I.R_GENERATED, 0)
+            set_rt(m, I.R_STOP_REQUEST, 0)
+            m.run(header(m, I.H_CODE))
+            # (the generated token went to tokens[i + 1]: the prompt's own back)
+            if i + 1 < len(prompt):
+                m.mem[tokens + 4 * (i + 1): tokens + 4 * (i + 2)] = struct.pack("<I", prompt[i + 1])
+    finally:
+        m.on_argmax = keep
+    return np.array(seen)
+
+
 def encode_sequence(m, tokens):
     """Run an encoder (BERT) image over a token sequence; returns the
     pooled output vector."""

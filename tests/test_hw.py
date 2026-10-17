@@ -241,10 +241,7 @@ with tempfile.TemporaryDirectory() as d:
                 v, _ = S.encode_sequence(m, ids)
                 outs.append(v[None, :])
             else:
-                seen = []
-                m.on_argmax = seen.append
-                S.generate(m, ids, 1)
-                outs.append(np.array(seen))
+                outs.append(S.prompt_logits(m, ids))
         ref, hw = outs
         rel = np.max(np.abs(hw - ref)) / np.max(np.abs(ref))
         if "bert" in name:
