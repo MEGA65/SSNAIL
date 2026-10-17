@@ -1,0 +1,20 @@
+# SSNAIL decoders: one URL per line (make modellist searches again)
+https://huggingface.co/ggml-org/test-model-stories260K/resolve/main/stories260K-f32.gguf
+https://huggingface.co/mradermacher/TinyStories-656K-GGUF/resolve/main/TinyStories-656K.f16.gguf
+https://huggingface.co/mradermacher/Experimental-Neo-TinyStories-Korean-800K-20240819-GGUF/resolve/main/Experimental-Neo-TinyStories-Korean-800K-20240819.f16.gguf
+https://huggingface.co/afrideva/Tinystories-gpt-0.1-3m-GGUF/resolve/main/tinystories-gpt-0.1-3m.fp16.gguf
+https://huggingface.co/RichardErkhov/alan918727_-_TinyStories-LLaMA2-20M-256h-4l-colab-gguf/resolve/main/TinyStories-LLaMA2-20M-256h-4l-colab.Q8_0.gguf
+https://huggingface.co/mradermacher/llama2.c-stories15M-GGUF/resolve/main/llama2.c-stories15M.f16.gguf
+https://huggingface.co/mradermacher/tinystories-gpt-30m-GGUF/resolve/main/tinystories-gpt-30m.f16.gguf
+https://huggingface.co/RichardErkhov/nilq_-_baby-python-mistral-1L-tiny-TinyStories-ft-gguf/resolve/main/baby-python-mistral-1L-tiny-TinyStories-ft.Q8_0.gguf
+https://huggingface.co/mradermacher/Llama-TinyStories-i1-GGUF/resolve/main/Llama-TinyStories.i1-Q6_K.gguf
+# Falcon-H1-Tiny (hybrid attention + Mamba-2: needs the converter's falcon-h1 support)
+https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Instruct-GGUF/resolve/main/Falcon-H1-Tiny-90M-Instruct-BF16.gguf
+https://huggingface.co/tiiuae/Falcon-H1-Tiny-Coder-90M-GGUF/resolve/main/Falcon-H1-Tiny-90M-Coder-BF16.gguf
+https://huggingface.co/tiiuae/Falcon-H1-Tiny-Tool-Calling-90M-GGUF/resolve/main/Falcon-H1-Tiny-90M-Tool-Calling-BF16.gguf
+https://huggingface.co/tiiuae/Falcon-H1-Tiny-R-90M-GGUF/resolve/main/Falcon-H1R-Tiny-90M-BF16.gguf
+# more of the family (f16, from mradermacher: tiiuae publish no GGUF of these)
+https://huggingface.co/mradermacher/Falcon-H1-Tiny-90M-Base-GGUF/resolve/main/Falcon-H1-Tiny-90M-Base.f16.gguf
+https://huggingface.co/mradermacher/Falcon-H1-Tiny-90M-Instruct-Curriculum-GGUF/resolve/main/Falcon-H1-Tiny-90M-Instruct-Curriculum.f16.gguf
+# (Falcon-H1-Tiny-Multilingual-100M: a 65536-token vocabulary, so it needs 72 MB
+# as Q4_0: MODELS_MEM=72)
