@@ -137,6 +137,8 @@ class Machine:
             elif op == I.HALT:
                 return
             elif op == I.COPY:
+                if (self.ea(x) | self.ea(y) | z) & 7:              # (as the hardware)
+                    raise SsnailError(f"COPY: not 8-byte aligned at PC ${self.pc:07X}")
                 self.write(self.ea(y), self.read(self.ea(x), z & 0xFFFF))
             elif op == I.SETN:
                 self.N = [x, y, z]
@@ -237,6 +239,8 @@ class Machine:
             elif op == I.SSMUPD:
                 blk = self.ea(x)
                 ha, aa, ua, ba = struct.unpack("<4I", self.read(blk, 16))
+                if (blk | ha | aa | ua | ba) & 3 or N1 > 0xFFFF:       # (as the hardware)
+                    raise SsnailError(f"SSMUPD: misaligned or N1 > 65535 at PC ${self.pc:07X}")
                 h = self.f32v(ha, N1 * N0).reshape(N1, N0)
                 av, uv, bv = self.f32v(aa, N1), self.f32v(ua, N1), self.f32v(ba, N0)
                 if self.hw:

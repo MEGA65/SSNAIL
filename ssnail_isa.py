@@ -33,7 +33,7 @@ Weight formats use ggml type numbers directly (see FMT_*).
 import struct
 
 # --- Opcodes -----------------------------------------------------------------
-NOP, HALT, SYNC, COPY = 0x00, 0x01, 0x02, 0x03
+NOP, HALT, SYNC, COPY = 0x00, 0x01, 0x02, 0x03   # COPY: Z bytes X -> Y, all 8-byte aligned
 SETN = 0x07     # N0 = X, N1 = Y, N2 = Z
 LI = 0x08       # R[a] = Z
 LDR = 0x09      # R[a] = u32 at addr(X)
@@ -63,7 +63,8 @@ VEXP = 0x2A     # Z = exp(X) (N0 f32), X <= 0: the exp table (softmax's); X >= 0
 SOFTPLUS = 0x2B # Z = softplus(X) = log(1 + exp(X)) (N0 f32), a table
 SSMUPD = 0x2C   # state update: addr(X) = parameter block (h, a, u, B: 4 x u32);
                 # for r < N1, c < N0: h[r][c] = a[r] * h[r][c] + u[r] * B[c]
-                # (h: N1 x N0 f32 rows, in place; a, u: N1 f32; B: N0 f32)
+                # (h: N1 x N0 f32 rows, in place; a, u: N1 f32; B: N0 f32;
+                # the block and the arrays 4-byte aligned, N1 < 65536)
 
 OPNAMES = {v: k for k, v in dict(
     NOP=NOP, HALT=HALT, SYNC=SYNC, COPY=COPY, SETN=SETN, LI=LI, LDR=LDR,

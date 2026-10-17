@@ -371,6 +371,9 @@ N0–N2 (lengths, set by SETN).
 | $27 | GELU | Z = gelu(X), tanh approximation (as ggml) |
 | $28 | MEANROWS | Z = mean of R[a] consecutive N0-element f32 rows starting at addr(X) |
 | $29 | CVT16 | Z (N0 × F16) = X (N0 × F32), round to nearest even (storing K/V rows in an F16 cache) |
+| $2A | VEXP | Z = exp(X) (N0 f32), the softmax's exp table: X ≥ 0 gives 1 (Mamba-2's dA = exp(dt·A), A < 0) |
+| $2B | SOFTPLUS | Z = log(1 + exp(X)) (N0 f32), a table (Mamba-2's dt) |
+| $2C | SSMUPD | Mamba-2 state update: addr(X) is a 4 × u32 parameter block (h, a, u, B); for r < N1, c < N0: h[r][c] = a[r]·h[r][c] + u[r]·B[c], h in place (N1 rows of N0 f32).  The block and arrays 4-byte aligned, N1 < 65536 |
 
 GEMV flag `b` bit 1 writes y as F16 instead of F32.  The ATTN parameter
 block's sixth word is the KV cache format: 0 F32, 1 F16.
