@@ -67,6 +67,7 @@ static uint8_t n_models;
 static int8_t cur = -1;
 static uint32_t avail;
 static uint8_t sector[512];
+static char buf[4 * 255 + 1];          /* a token's text, folded (one user at a time) */
 
 /* --- screen: an 80 x 50 text screen, output scrolling above the input line */
 #define SCR 0xF000U
@@ -425,7 +426,6 @@ static void reply(const char *text)
   uint32_t at, plen, got = 0, g, t0;
   uint16_t n, i;
   uint8_t stop_sent = 0;
-  static char buf[4 * 255 + 1];
   char msg[80];
   static uint8_t piece[255];
 
@@ -611,7 +611,6 @@ static void cmd_tok(const char *text)
 {
   static uint32_t t[64];
   static uint8_t piece[255];
-  static char buf[4 * 255 + 1];
   char m[90];
   uint16_t n, i;
   if (cur < 0) { say(2, "nothing loaded"); return; }
@@ -637,7 +636,6 @@ static void cmd_step(void)
   uint32_t tokens, t;
   uint16_t n, i;
   uint32_t spins = 0;
-  static char buf[4 * 255 + 1];
   char m[90];
   static uint8_t piece[255];
   if (cur < 0) { say(2, "nothing loaded"); return; }
