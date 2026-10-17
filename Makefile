@@ -51,7 +51,10 @@
 #   MODELS_MEM      allmodels' memory size: 8, 64 or 72 (default 64: R4-R6 SDRAM);
 #                   a line of models.txt can set its own: "URL mem=72"
 
-SSNAIL_TOOLS ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# (expanded once, here: MAKEFILE_LIST grows with each include)
+ifndef SSNAIL_TOOLS
+SSNAIL_TOOLS := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+endif
 PYTHON       ?= python3
 CONVERT      := $(PYTHON) $(SSNAIL_TOOLS)ssnail_convert.py
 SIM          := $(PYTHON) $(SSNAIL_TOOLS)ssnail_sim.py
