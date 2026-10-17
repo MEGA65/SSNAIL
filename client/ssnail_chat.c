@@ -694,7 +694,13 @@ int main(void)
 {
   char line[MAXIN];
   int8_t d;
+  /* No KERNAL from here on (keys come from $D610, files from the
+     hypervisor): its interrupt would otherwise run, and touch VIC and
+     colour RAM, 60 times a second */
+  __asm__ volatile("sei");
   mega65_io_enable();
+  POKE(0xD05D, PEEK(0xD05D) & 0x7F);    /* hot registers off: VIC-II writes
+                                           leave the VIC-IV's settings alone */
   screen_setup();
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
   cmd_found();
