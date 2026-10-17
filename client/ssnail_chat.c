@@ -211,10 +211,15 @@ static void status(uint8_t c, const char *s)
 
 static void screen_setup(void)
 {
+  /* The VIC-II / III registers with hot registers on, so the VIC-IV applies
+     them (V400 is what sets 25 or 50 rows); then hot registers off, so that
+     nothing undoes the VIC-IV settings written after them */
+  POKE(0xD05D, PEEK(0xD05D) | 0x80);
   POKE(0xD018, 0x16);           /* lower case */
   POKE(0xD054, 0x00);
   POKE(0xD031, rows == 50 ? 0xE8 : 0xE0);  /* H640, fast CPU (and V400: 50 rows) */
   POKE(0xD016, 0xC9);
+  POKE(0xD05D, PEEK(0xD05D) & 0x7F);
   POKE(0xD058, 80); POKE(0xD059, 0);
   POKE(0xD05E, 80);
   POKE(0xD060, SCR & 0xFF); POKE(0xD061, (SCR >> 8) & 0xFF); POKE(0xD062, (SCR >> 16) & 0xFF);
@@ -766,18 +771,14 @@ int main(void)
   POKE(0xD020, 2);
   __asm__ volatile("sei");
   mega65_io_enable();
-  POKE(0xD05D, PEEK(0xD05D) & 0x7F);    /* hot registers off: VIC-II writes
-                                           leave the VIC-IV's settings alone */
   POKE(0xD020, 7);
   screen_setup();
 
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
 
   cmd_found();
-
-  while(1) POKE(0xD020,PEEK(0xD012)); 
-   
   cmd_regs();
+   
   out_newline();
   say(7, "/scan lists the models on the SD card (in /SSNAIL, else the root).");
   say(7, "/load N [direct|port|slow] loads one (direct, the default, DMAs into SDRAM).");
