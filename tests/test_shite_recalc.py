@@ -72,6 +72,13 @@ sh.formula(2, 17, F().ref(-1, -14, long=True).f(1e10).op(SH.OP_MUL).end())      
 sh.formula(2, 18, F().host("VLOOKUP(A1,B:C,2)", 19, 39).end())                    # a host call's result cell
 sh.formula(2, 19, F().i(1).i(2).op(SH.OP_LT).ref(0, -19).ref(0, -18).op(SH.OP_GT).op(SH.OP_ADD).end())  # 1 + 0
 sh.number(19, 39, 123)
+# cell lists: blank and zero cells counted differently (review R2)
+sh.number(6, 5, 0)
+sh.formula(6, 0, F().cells([(6, 5, True, True), (6, 6, True, True)]).call(SH.FN_COUNT, 1).end())   # zero, blank: 1
+sh.formula(6, 1, F().ref(0, 5).call(SH.FN_AVERAGE, 1).end())                       # blank G7: #DIV/0!
+sh.formula(6, 2, F().ref(0, 3).ref(0, 4).op(SH.OP_ADD).end())                     # zero + blank: 0
+sh.formula(6, 3, F().cells([(0, c, True, True) for c in range(5)] * 8).call(SH.FN_SUM, 1).end())  # 40 cells
+
 # row 3: forward references (need a second round), row 4: an oscillation
 sh.formula(3, 0, F().ref(2, 0).i(1).op(SH.OP_ADD).end())                          # =A6+1
 sh.formula(5, 0, F().ref(-3, 1).i(1).op(SH.OP_ADD).end())                         # =B3+1 = 85
@@ -92,10 +99,14 @@ check(R(2, 11) == ("f", ((10 + 32) + 0.5) + 19.99 + 3) and R(2, 12) == ("i", 5)
       and R(2, 13) == ("f", 0.5) and R(2, 14) == ("i", 32), "SUM (a left fold, F64 from the first F64), COUNT, MIN, MAX")
 check(R(2, 15) == ("f", 47 / 3) and R(2, 16) == ("i", 1), "AVERAGE of references and a value; text from a reference skipped")
 check(R(2, 18) == ("i", 123) and R(2, 19) == ("i", 1), "a host call reads its result cell; comparisons")
+check(R(6, 0) == ("i", 1) and R(6, 1) == ("e", SH.E_DIV0) and R(6, 2) == ("i", 0),
+      "blank cells: COUNT skips them, AVERAGE of a blank is #DIV/0!, arithmetic takes 0")
+check(R(6, 3) == ("f", sum([10, 32, 0.5, 19.99, 3] * 8, 0.0)),
+      "a 40-cell list in one stack entry")
 check(R(5, 0) == ("i", 85) and R(3, 0) == ("i", 1), "a forward reference sees the old value in round 1")
 d = SH.Descriptor(m, desc)
 chg = SH.u32(m, desc + SH.D_CHANGED)
-check(n1 == chg and SH.u32(m, desc + SH.D_ROUND) == 1 and SH.u32(m, desc + SH.D_EVALS) == 24,
+check(n1 == chg and SH.u32(m, desc + SH.D_ROUND) == 1 and SH.u32(m, desc + SH.D_EVALS) == 28,
       f"round 1: {chg} changed, counters")
 SH.recalc(m, desc, 0, ALL, 0, ALL)
 check(R(3, 0) == ("i", 86), "round 2: the forward reference settles")

@@ -233,8 +233,8 @@ class Sheet:
 # --- values -------------------------------------------------------------------------
 # A value on the evaluation stack: kind 'i' (I64, with fixed point k: the
 # format byte, bit 7 binary), 'f' (F64), 't' (text bytes), 'e' (error code),
-# 'z' (an empty cell: I64 0, skipped by aggregates), 'r' (a range: r1, c1,
-# r2, c2).  ref: it came from a reference (aggregates skip its text).
+# 'z' (blank: an empty cell or none; I64 0 to arithmetic, skipped by
+# aggregates), 'r' (a range: r1, c1, r2, c2), 'l' (a cell list).  ref: it came from a reference (aggregates skip its text).
 E_DIV0, E_VALUE, E_REF, E_NUM, E_CIRC, E_NA, E_STACK, E_NAME, E_COMPILE = range(1, 10)
 I64_MIN, I64_MAX = -(1 << 63), (1 << 63) - 1
 DEC_KMAX, BIN_KMAX = 18, 62
@@ -306,7 +306,7 @@ def as_num(a):
     """A scalar operand: 'z' is I64 0; ranges and text are #VALUE!."""
     if a.kind == "z":
         return V("i", 0, 0)
-    if a.kind in ("r", "t"):
+    if a.kind in ("r", "t", "l"):
         return err(E_VALUE)
     return a
 
@@ -371,7 +371,7 @@ def neg(a):
 
 # --- bytecode -----------------------------------------------------------------------
 OP_END, OP_I8, OP_I32, OP_I64, OP_F64, OP_STR, OP_FIX, OP_REF, OP_RECT, OP_HOSTCALL, \
-    OP_JZ, OP_JMP, OP_CALL = range(13)
+    OP_JZ, OP_JMP, OP_CALL, OP_CELLS = range(14)
 OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW, OP_NEG, OP_PCT, OP_CONCAT = range(0x10, 0x18)
 OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE = range(0x18, 0x1E)
 FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT = range(5)
@@ -401,6 +401,13 @@ def sext(v, bits):
     return v - (1 << bits) if v & (1 << (bits - 1)) else v
 
 
+def long_ref(w, frow, fcol):
+    """The long form's 48-bit payload: (row, col), absolute and wrapped."""
+    ra, ca = w >> 47 & 1, w >> 46 & 1
+    rv, cv = w >> 24 & 0xFFFFF, w & 0xFFFFFF
+    return (rv if ra else (frow + rv) % MAX_ROWS), (cv if ca else (fcol + cv) % MAX_COLS)
+
+
 def ref_at(b, i, frow, fcol):
     """A reference (short form, or REF and the long form) at b[i]:
     (row, col, next i), absolute and wrapped."""
@@ -416,11 +423,7 @@ def ref_at(b, i, frow, fcol):
     if i < len(b) and b[i] == OP_REF:
         if i + 7 > len(b):
             raise Abort(E_STACK)
-        w = int.from_bytes(b[i + 1:i + 7], "big")
-        ra, ca = w >> 47 & 1, w >> 46 & 1
-        rv, cv = w >> 24 & 0xFFFFF, w & 0xFFFFFF
-        row = rv if ra else (frow + rv) % MAX_ROWS
-        col = cv if ca else (fcol + cv) % MAX_COLS
+        row, col = long_ref(int.from_bytes(b[i + 1:i + 7], "big"), frow, fcol)
         return row, col, i + 7
     raise Abort(E_STACK)
 
@@ -524,7 +527,12 @@ def aggregate(sv, fid, args):
             if not from_cells:
                 raise Abort(E_VALUE)
     for a in args:
-        if a.kind == "r":
+        if a.kind == "l":
+            for r, c in a.v:
+                if r >= sv.d.nrows or c >= sv.d.ncols:
+                    raise Abort(E_REF)
+                take(sv.value(sv.find(r, c)), True)
+        elif a.kind == "r":
             r1, c1, r2, c2 = a.v
             for r in range(r1, min(r2, sv.d.nrows - 1) + 1):
                 for c in sv.row_cells(r, c1, c2):
@@ -609,8 +617,18 @@ def evaluate(sv, code, frow, fcol):
             elif op == OP_HOSTCALL:
                 n, i = varlen(code, i)
                 i += n
-                r, c, i = ref_at(code, i, frow, fcol)
+                if i + 6 > len(code):
+                    raise Abort(E_STACK)
+                r, c = long_ref(int.from_bytes(code[i:i + 6], "big"), frow, fcol)
+                i += 6
                 push(sv.value(sv.find(r, c)) if r < sv.d.nrows and c < sv.d.ncols else err(E_REF))
+            elif op == OP_CELLS:
+                n, i = varlen(code, i)
+                cells = []
+                for _ in range(n):
+                    r, c, i = ref_at(code, i, frow, fcol)
+                    cells.append((r, c))
+                push(V("l", cells))
             elif op == OP_CALL:
                 fid, i = varlen(code, i)
                 argc, i = varlen(code, i)
@@ -776,7 +794,12 @@ class F:
 
     def host(self, text, row, col, rabs=True, cabs=True):
         t = text.encode("ascii")
-        self.b += bytes([OP_HOSTCALL]) + varlen_bytes(len(t)) + t + self._ref(row, col, rabs, cabs)
+        self.b += bytes([OP_HOSTCALL]) + varlen_bytes(len(t)) + t + self._ref(row, col, rabs, cabs, long=True)[1:]
+        return self
+
+    def cells(self, refs):
+        """refs: (row, col, rabs, cabs) each."""
+        self.b += bytes([OP_CELLS]) + varlen_bytes(len(refs)) + b"".join(self._ref(*r) for r in refs)
         return self
 
     def call(self, fid, argc):
