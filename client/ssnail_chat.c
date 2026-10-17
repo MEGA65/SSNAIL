@@ -10,7 +10,10 @@
     /regs        SSNAIL's registers, and $D7FE
     /scan        find the models on the SD card (/models lists them again)
     /hdr N       model N's header fields, from the file
-    /load N      load it (DMA into the load port); /load N slow: byte by byte
+    /load N [direct|port|slow]   load it: direct (default) = DMA straight
+                 into SSNAIL's RAM at $8000000+ through the CPU's view of SDRAM;
+                 port = DMA into the load port (destination held); slow = the
+                 load port, byte by byte
     /check       the loaded header and first payload bytes read back from
                  $8000000 (by lpeek and by DMA), against the file
     /tok TEXT    tokenize TEXT with the loaded image's tables, and back
@@ -24,6 +27,7 @@
 #include <mega65/memory.h>
 #include <mega65/fileio.h>
 #include <mega65/dirent.h>
+#include <mega65/targets.h>
 #include "ssnail_tokc.h"
 
 void do_dma(void);              /* (mega65-libc's, not in its header) */
@@ -48,7 +52,7 @@ void do_dma(void);              /* (mega65-libc's, not in its header) */
 #define R_STOP_REQUEST 0x50
 #define R_STOP_REASON 0x54
 
-#define MAXMODELS 40
+#define MAXMODELS 24
 #define NAMELEN 64
 
 struct model {
@@ -56,7 +60,7 @@ struct model {
   uint8_t in_dir;                /* 1: /SSNAIL, 0: the root */
   uint32_t mem;
   uint8_t arch;
-  char desc[48];
+  char desc[40];
 };
 static struct model models[MAXMODELS];
 static uint8_t n_models;
@@ -340,10 +344,20 @@ static void list_models(void)
 
 /* stream the file: the 256-byte header to $8000000, the rest to the load
    base (H_LOAD_BASE), one sector at a time by DMA */
-static uint8_t slow_load;
+#define LOAD_DIRECT 0
+#define LOAD_PORT 1
+#define LOAD_SLOW 2
+static uint8_t load_mode;
+static uint32_t dst;                    /* (direct: where the next bytes go) */
 static void lp_send(const uint8_t *src, uint16_t n)
 {
-  if (slow_load) lp_bytes(src, n); else lp_dma(src, n);
+  if (load_mode == LOAD_DIRECT) { lcopy((uint32_t)(uint16_t)src, dst, n); dst += n; }
+  else if (load_mode == LOAD_SLOW) lp_bytes(src, n);
+  else lp_dma(src, n);
+}
+static void lp_to(uint32_t a, uint8_t clr)
+{
+  if (load_mode == LOAD_DIRECT) dst = a; else lp_commit(a, clr);
 }
 
 static uint8_t load(uint8_t i)
@@ -361,11 +375,18 @@ static uint8_t load(uint8_t i)
   if (n < 256) { close(fd); status(2, "not an image"); return 0; }
   lb = le32(sector + H_LOAD_BASE);
   len = 256 + le32(sector + H_PAYLOAD_LEN);
-  lp_commit(IMG, 1);
+  if (load_mode == LOAD_DIRECT && (lpeek(SN + 2) & 2) == 0) {
+    close(fd); status(2, "direct needs SDRAM at $8000000: /load N port"); return 0;
+  }
+  if (load_mode == LOAD_DIRECT && lb + len > 0xC000000UL) {
+    close(fd); status(2, "past $C000000 (HyperRAM): the CPU can't see it there: /load N port");
+    return 0;
+  }
+  lp_to(IMG, 1);
   for (;;) {
     if (first) {
       lp_send(sector, 256);
-      lp_commit(lb, 0);
+      lp_to(lb, 0);
       lp_send(sector + 256, n - 256);
       first = 0;
     } else {
@@ -381,8 +402,10 @@ static uint8_t load(uint8_t i)
     if (!n) break;
   }
   close(fd);
-  lp_commit(lb, 0);                     /* (flush) */
-  if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
+  if (load_mode != LOAD_DIRECT) {
+    lp_commit(lb, 0);                   /* (flush) */
+    if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
+  }
   cur = i;
   tok_init(IMG);
   sprintf(msg, "%s: %s, %lu-token context", m->name, m->desc, rd32(IMG + H_MAXCTX));
@@ -402,7 +425,8 @@ static void reply(const char *text)
   uint32_t at, plen, got = 0, g, t0;
   uint16_t n, i;
   uint8_t stop_sent = 0;
-  char buf[4 * 255 + 1], msg[80];
+  static char buf[4 * 255 + 1];
+  char msg[80];
   static uint8_t piece[255];
 
   n = tok_encode(text, fresh, ids, MAXIN + 2);
@@ -484,6 +508,24 @@ static void read_line(char *buf, uint8_t max)
 
 /* --- step-by-step checks ------------------------------------------- */
 static void say(uint8_t c, const char *s) { colour = c; out_str(s); out_newline(); colour = 1; }
+
+static void cmd_found(void)
+{
+  char m[90];
+  uint8_t t = detect_target(), caps = lpeek(SN + 2);
+  sprintf(m, "board: %s (target $%02X)", t == TARGET_MEGA65R6 ? "MEGA65 R6" : t == TARGET_MEGA65R5 ? "MEGA65 R5"
+          : t == TARGET_MEGA65R4 ? "MEGA65 R4" : t == TARGET_MEGA65R3 ? "MEGA65 R3" : "other", t);
+  say(3, m);
+  sprintf(m, "SSNAIL v%u: HyperRAM port %s, SDRAM %s", lpeek(SN + 1),
+          caps & 1 ? "yes" : "no", caps & 2 ? "PRESENT" : "not present");
+  say(3, m);
+  if (caps & 2)
+    say(3, "map: SDRAM at $8000000 (64 MB, the CPU sees it there too), HyperRAM at $C000000 (8 MB)");
+  else
+    say(3, "map: HyperRAM at $8000000 (8 MB)");
+  sprintf(m, "models up to %lu MB fit", avail >> 20);
+  say(3, m);
+}
 
 static void cmd_regs(void)
 {
@@ -569,7 +611,8 @@ static void cmd_tok(const char *text)
 {
   static uint32_t t[64];
   static uint8_t piece[255];
-  char m[90], buf[4 * 255 + 1];
+  static char buf[4 * 255 + 1];
+  char m[90];
   uint16_t n, i;
   if (cur < 0) { say(2, "nothing loaded"); return; }
   n = tok_encode(text, 1, t, 64);
@@ -594,7 +637,8 @@ static void cmd_step(void)
   uint32_t tokens, t;
   uint16_t n, i;
   uint32_t spins = 0;
-  char m[90], buf[4 * 255 + 1];
+  static char buf[4 * 255 + 1];
+  char m[90];
   static uint8_t piece[255];
   if (cur < 0) { say(2, "nothing loaded"); return; }
   tokens = rd32(IMG + H_TOKENS);
@@ -632,8 +676,14 @@ int main(void)
   mega65_io_enable();
   screen_setup();
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
+  cmd_found();
   cmd_regs();
-  status(7, "step by step: /regs /scan /hdr N /load N [slow] /check /tok TEXT /step");
+  out_newline();
+  say(7, "/scan lists the models on the SD card (in /SSNAIL, else the root).");
+  say(7, "/load N [direct|port|slow] loads one (direct, the default, DMAs into SDRAM).");
+  say(7, "Then /check, /tok TEXT and /step, one at a time; then type to chat.");
+  say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
+  status(7, "ready");
   (void)d;
   for (;;) {
     read_line(line, sizeof(line));
@@ -653,10 +703,12 @@ int main(void)
         if (k != 0xFF) cmd_hdr(k);
       } else if (!strncmp(line, "/load ", 6)) {
         uint8_t k = pick(line + 6);
-        slow_load = strstr(line, "slow") != 0;
+        load_mode = strstr(line, "slow") ? LOAD_SLOW : strstr(line, "port") ? LOAD_PORT : LOAD_DIRECT;
         if (k != 0xFF && models[k].mem > avail) say(2, "too big for this board's RAM");
         else if (k != 0xFF) {
-          say(7, slow_load ? "loading byte by byte..." : "loading by DMA...");
+          say(7, load_mode == LOAD_SLOW ? "loading through the load port, byte by byte..."
+                 : load_mode == LOAD_PORT ? "loading by DMA into the load port..."
+                 : "loading by DMA straight into SSNAIL's RAM at $8000000...");
           if (load(k)) say(5, "loaded: /check next");
           fresh = 1;
         }
@@ -668,7 +720,7 @@ int main(void)
         unsigned long v = 0;
         sscanf(line + 5, "%lu", &v);
         if (v) n_gen = v;
-      } else status(2, "/regs /scan /models /hdr N /load N [slow] /check /tok TEXT /step /new /len N");
+      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /tok TEXT /step /new /len N");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }
