@@ -443,6 +443,15 @@ static void list_models(void)
     sprintf(line, "%2u %-44.44s %3lu MB %s%s\n", i + 1, m->name, (m->mem + 0xFFFFF) >> 20,
             m->arch == 2 ? "(encoder) " : "", m->mem > avail ? "(too big)" : "");
     out_str(line);
+    if ((i + 1) % 40 == 0 && i + 1 < n_models) {      /* a page at a time */
+      colour = 7;
+      out_str("-- a key for more --");
+      while (!PEEK(0xD610)) ;
+      POKE(0xD610, 0);
+      ox = 0;
+      clear_rows(oy, oy);
+      colour = 3;
+    }
   }
   colour = 1;
 }
@@ -491,7 +500,6 @@ static uint8_t load(uint8_t i)
   struct model *m = &models[i];
   uint8_t fd;
   uint16_t n, first = 1;
-  uint8_t first_check = 1, hdr_ok = 0;
   uint32_t total = 0, len, lb;
   char msg[90];
   chdirroot();
@@ -519,20 +527,6 @@ static uint8_t load(uint8_t i)
       lp_send(sector, n);
     }
     total += n;
-    if (first_check) {                  /* the header, read back straight away */
-      first_check = 0;
-      hdr_ok = lpeek(IMG) == 'S' && lpeek(IMG + 1) == 'S' && lpeek(IMG + 2) == 'N'
-               && lpeek(IMG + 3) == 'L';
-      sprintf(msg, "header written: reads back %02X %02X %02X %02X (%s)", lpeek(IMG),
-              lpeek(IMG + 1), lpeek(IMG + 2), lpeek(IMG + 3), hdr_ok ? "right" : "WRONG");
-      status(hdr_ok ? 5 : 2, msg);
-    }
-    if (hdr_ok && lpeek(IMG) != 'S') {  /* ... and if it changes, when */
-      hdr_ok = 0;
-      sprintf(msg, "the header changed after %lu KB, writing at $%07lX", total >> 10,
-              load_mode == LOAD_DIRECT ? dst : 0);
-      status(2, msg);
-    }
     if ((total & 0x3FFFF) < 512 || total >= len) {
       sprintf(msg, "loading %s: %lu of %lu KB", m->name, total >> 10, len >> 10);
       row1(7, msg);
@@ -550,9 +544,6 @@ static uint8_t load(uint8_t i)
   }
   cur = i;
   tok_init(IMG);
-  sprintf(msg, "header at the end: %02X %02X %02X %02X", lpeek(IMG), lpeek(IMG + 1),
-          lpeek(IMG + 2), lpeek(IMG + 3));
-  status(lpeek(IMG) == 'S' ? 5 : 2, msg);
   sprintf(msg, "%s: %s", m->name, m->desc);
   row1(5, msg);
   return 1;
@@ -917,6 +908,7 @@ int main(void)
       }
       else if (!strncmp(line, "/scan", 5)) {
         say(7, "scanning the SD card...");
+        closeall();                     /* (a handle left open made every other scan fail) */
         n_models = 0;
         scan(1);
         if (!n_models) scan(0);         /* (chdir can't tell us /SSNAIL is missing) */
