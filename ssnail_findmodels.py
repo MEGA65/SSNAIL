@@ -4,6 +4,8 @@
     ssnail_findmodels.py                      # default searches for small models
     ssnail_findmodels.py tinystories minilm   # your own search terms
     ssnail_findmodels.py --mem 8 --limit 40
+    ssnail_findmodels.py --urls models/models.txt   # also write the download list
+    ssnail_findmodels.py --fetch models/models.txt --dir models   # get what's missing
 
 For each candidate repository it reports the architecture, parameter count,
 which memory sizes it should fit (and at which weight format), the best file
@@ -115,6 +117,53 @@ def human(n):
     return str(n)
 
 
+def base_name(name):
+    """A file's model, without its quantisation and packaging tags: the same
+    model from different repositories (stories15M-q8_0, llama2.c-stories15M.f16,
+    stories15M-bf16, ...) gives the same key."""
+    n = name.lower()
+    n = re.sub(r"\.gguf$", "", n)
+    n = re.sub(r"[-_.](i1|imat)(?=[-_.]|$)", "", n)
+    n = re.sub(r"[-_.](f32|fp32|bf16|f16|fp16|i?q\d(_[a-z0-9]+)*|tq\d_\d|mxfp4)(?=[-_.]|$)", "", n)
+    n = re.sub(r"[-_.]?(ggml[-_.]model|gguf)(?=[-_.]|$)", "", n)
+    n = re.sub(r"^(llama2\.c|xenova)[-_.]", "", n)
+    return re.sub(r"[-_.]+", "-", n).strip("-")
+
+
+def fetch_list(listfile, outdir):
+    """Download each URL in listfile (one per line, # comments) to outdir,
+    skipping files already there; a partial download is kept as .part and
+    continued next time.  Returns the number that failed."""
+    import os
+    os.makedirs(outdir, exist_ok=True)
+    failed = 0
+    for line in open(listfile):
+        url = line.split("#")[0].strip()
+        if not url:
+            continue
+        name = urllib.parse.unquote(url.rstrip("/").split("/")[-1].split("?")[0])
+        path = os.path.join(outdir, name)
+        if os.path.exists(path):
+            continue
+        part = path + ".part"
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        req = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
+        print(f"fetching {name}" + (f" (from {have} bytes)" if have else ""), file=sys.stderr)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r, \
+                    open(part, "ab" if have and r.status == 206 else "wb") as f:
+                while True:
+                    b = r.read(1 << 20)
+                    if not b:
+                        break
+                    f.write(b)
+            os.replace(part, path)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"  failed: {e}", file=sys.stderr)
+            failed += 1
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -124,7 +173,16 @@ def main():
     ap.add_argument("--limit", type=int, default=15, help="repositories per search term")
     ap.add_argument("--all-arch", action="store_true",
                     help="also list architectures SSNAIL can't run yet")
+    ap.add_argument("--fetch", metavar="FILE",
+                    help="no search: download each URL listed in FILE into --dir, unless "
+                         "the file is already there")
+    ap.add_argument("--dir", default=".", help="where --fetch puts the files (default .)")
+    ap.add_argument("--urls", metavar="FILE",
+                    help="also write the best file's URL of each candidate to FILE, one per "
+                         "line (for make allmodels): split files and repeated names left out")
     args = ap.parse_args()
+    if args.fetch:
+        sys.exit(fetch_list(args.fetch, args.dir))
 
     seen, rows = set(), []
     for q in args.queries or DEFAULT_QUERIES:
@@ -165,10 +223,29 @@ def main():
     print("\nFit columns: weight format the converter would likely use (q8 / q4), or - if "
           "it won't fit.\n'llama?' = architecture guessed from the name; check with make foo.info.\n")
     print("To fetch the best file of each (unquantised where available):")
+    urls, names = [], set()
     for dl, repo, arch, params, best, fits in rows:
         url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(best[0])}"
         local = best[0].split("/")[-1]
         print(f"  make fetch URL={url}" + (f"   # {local}" if local else ""))
+        # (the converter reads one file: a split model's first part is not one;
+        # two repositories' files of one name would land on the same file)
+        if not re.search(r"-\d{5}-of-\d{5}\.gguf$", local) and local not in names:
+            names.add(local)
+            urls.append((base_name(local), file_bpw(local) or 0, url))
+    # one file per model: the most precise of a model's files (the converter
+    # quantises better from F16 / F32 than from an already-quantised file);
+    # rows come smallest model first, so ties keep the first
+    best_of = {}
+    for key, bpw, url in urls:
+        if key not in best_of or bpw > best_of[key][0]:
+            best_of[key] = (bpw, url)
+    urls = [u for k, (b, u) in best_of.items()]
+    if args.urls:
+        with open(args.urls, "w") as f:
+            f.write("# SSNAIL candidates from ssnail_findmodels.py: one URL per line (edit freely)\n")
+            f.write("".join(u + "\n" for u in urls))
+        print(f"wrote {len(urls)} URLs to {args.urls}", file=sys.stderr)
 
 
 if __name__ == "__main__":

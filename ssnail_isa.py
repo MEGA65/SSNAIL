@@ -117,6 +117,8 @@ OUTPUT_AREA = HYPERRAM_BASE + 0x100    # up to 3840 bytes (960 floats)
 OUTPUT_AREA_SIZE = 0xF00
 TOKENS_AREA = HYPERRAM_BASE + 0x1000   # 16 KB: up to 4096 tokens
 TOKENS_AREA_SIZE = 0x4000
+# ATTN attends over at most this many positions (the hardware's score RAM)
+ATTN_MAX_POS = 1024
 SD_END = HYPERRAM_BASE + 64 * 0x100000 # end of SDRAM on R4-R6 ($C000000)
 MEM_TOP = HYPERRAM_BASE + 72 * 0x100000
 HEADER_SIZE = 0x100

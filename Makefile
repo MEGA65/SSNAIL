@@ -19,6 +19,10 @@
 # >8mb images are loaded via SSNAIL through a staging buffer; see README.
 # foo.ssnail is the same as foo.8mb.ssnail unless ATTICRAM is set.
 #   make findmodels [QUERY="tinystories minilm"] [MEM=8]   # search Hugging Face
+#   make allmodels                       # fetch the list's missing GGUFs into models/,
+#                                        # then images of each in sdcard/SSNAIL/ (copy
+#                                        # that folder to the SD card's root)
+#   make modellist [QUERY=...]           # (re)write models/models.txt from a search
 #   make fetch URL=https://huggingface.co/.../resolve/main/foo.gguf
 #   make test
 #
@@ -35,6 +39,12 @@
 #                   HYPERRAM_MB is still accepted
 #   PROMPT, TOKENS  for the .run target
 #   TEXT            text file for .tokcheck (default: built-in sample)
+#   MODELS_DIR      allmodels' GGUF cache (default models)
+#   MODELS_OUT      allmodels' images (default sdcard/SSNAIL): foo.ssnail at the
+#                   default context, and foo.ctxN.ssnail for each N in MODELS_CTX
+#                   the model was trained for (ATTN takes at most 1024 positions)
+#   MODELS_CTX      default 512 1024
+#   MODELS_MEM      allmodels' memory size: 8, 64 or 72 (default 64: R4-R6 SDRAM)
 
 SSNAIL_TOOLS ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PYTHON       ?= python3
@@ -53,7 +63,16 @@ CHAT_OPTS     = -n $(TOKENS) $(if $(TEMP),$(if $(filter 0 0.0,$(TEMP)),--greedy,
 CONVERT_OPTS  = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(ATTICRAM) $(if $(TYPE),--type "$(TYPE)")
 CONVERT_OPTS += $(if $(CONTEXT_WINDOW),--ctx $(CONTEXT_WINDOW))
 
-.PHONY: test clean findmodels fetch %.all %.chat %.run %.tokcheck
+MODELS_DIR   ?= models
+MODELS_OUT   ?= sdcard/SSNAIL
+MODELS_CTX   ?= 512 1024
+MODELS_MEM   ?= 64
+MODEL_LIST   := $(MODELS_DIR)/models.txt
+# (a split model's parts are not one GGUF the converter can read)
+MODEL_GGUFS   = $(filter-out %-of-00002.gguf %-of-00003.gguf %-of-00004.gguf %-of-00005.gguf,\
+                $(wildcard $(MODELS_DIR)/*.gguf))
+
+.PHONY: test clean findmodels fetch modellist allmodels allmodels-images %.all %.chat %.run %.tokcheck
 .PRECIOUS: %.ssnail
 
 %.ssnail: %.gguf $(TOOL_DEPS)
@@ -89,6 +108,42 @@ SIZED_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) $(if $(CONTEXT_WINDOW),--ct
 
 findmodels:
 	$(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py $(QUERY) $(if $(MEM),--mem $(MEM))
+
+# The candidate list: one URL per line, the most precise file of each model
+# (written once; edit it, or make modellist to search again)
+$(MODEL_LIST):
+	@mkdir -p $(MODELS_DIR)
+	$(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py $(QUERY) --urls $@ > /dev/null
+
+modellist:
+	@mkdir -p $(MODELS_DIR)
+	$(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py $(QUERY) --urls $(MODEL_LIST) > /dev/null
+
+# Fetch what's missing, then convert every GGUF in MODELS_DIR (fetched or put
+# there by hand), unattended: a model or variant that won't fit, would need
+# quantising below its file's precision, or would exceed the model's trained
+# context is skipped with the converter's message.
+allmodels: $(MODEL_LIST)
+	-$(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py --fetch $(MODEL_LIST) --dir $(MODELS_DIR)
+	-@$(MAKE) -k --no-print-directory -f $(firstword $(MAKEFILE_LIST)) allmodels-images
+	@echo; echo "Images in $(MODELS_OUT)/:"; ls -1s $(MODELS_OUT)/ 2>/dev/null || echo "  (none)"
+
+MODEL_STEMS = $(patsubst $(MODELS_DIR)/%.gguf,%,$(MODEL_GGUFS))
+allmodels-images: $(MODEL_STEMS:%=$(MODELS_OUT)/%.ssnail) \
+  $(foreach c,$(MODELS_CTX),$(MODEL_STEMS:%=$(MODELS_OUT)/%.ctx$(c).ssnail))
+
+MODEL_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(MODELS_MEM) $(if $(TYPE),--type "$(TYPE)")
+
+$(MODELS_OUT)/%.ssnail: $(MODELS_DIR)/%.gguf $(TOOL_DEPS)
+	@mkdir -p $(MODELS_OUT)
+	$(CONVERT) convert $< -o $@ $(MODEL_OPTS) </dev/null
+
+define CTX_RULE
+$(MODELS_OUT)/%.ctx$(1).ssnail: $(MODELS_DIR)/%.gguf $(TOOL_DEPS)
+	@mkdir -p $(MODELS_OUT)
+	$$(CONVERT) convert $$< -o $$@ $$(MODEL_OPTS) --ctx $(1) --within-train </dev/null
+endef
+$(foreach c,$(MODELS_CTX),$(eval $(call CTX_RULE,$(c))))
 
 fetch:
 	@test -n "$(URL)" || { echo "usage: make fetch URL=https://huggingface.co/<repo>/resolve/main/<file>.gguf"; exit 1; }

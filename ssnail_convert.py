@@ -387,6 +387,9 @@ class Builder:
         if ctx + 1 > I.TOKENS_AREA_SIZE // 4:
             raise SystemExit(f"--ctx {ctx} too large: the token buffer holds "
                              f"{I.TOKENS_AREA_SIZE // 4 - 1} tokens")
+        if ctx > I.ATTN_MAX_POS:
+            raise SystemExit(f"--ctx {ctx} too large: ATTN attends over at most "
+                             f"{I.ATTN_MAX_POS} positions")
         self.data = bytearray()          # payload, loaded at self.base
         self.lossy = []                  # weights stored with fewer bits than the source
         self.host = None                 # (no separate segment any more)
@@ -1071,6 +1074,9 @@ def main():
                    help="weight format: keep native formats; force one; 'mixed' (Q8_0 layers, "
                         "Q4_0 embedding/classifier); or 'auto' (best that fits: keep, q8_0, "
                         "mixed, q4_0; asks before going below the file's own precision)")
+    c.add_argument("--within-train", action="store_true",
+                   help="refuse a --ctx longer than the model's trained context (for "
+                        "building context variants of many models)")
     c.add_argument("--kv", default="f16", choices=["f16", "f32"],
                    help="KV cache format (default f16; f32 for exact reference runs)")
     c.add_argument("--fallback", default="q8_0", choices=list(FMT_BY_NAME),
@@ -1091,6 +1097,9 @@ def main():
 
     m = Model(args.gguf)
     if args.cmd == "convert":
+        if args.within_train and args.ctx and args.ctx > params(m)["ctx_train"]:
+            raise SystemExit(f"--ctx {args.ctx}: {args.gguf} is trained for "
+                             f"{params(m)['ctx_train']} positions; not built")
         try:
             image = convert(m, args.ctx, args.wtype, FMT_BY_NAME[args.fallback], args.hyperram_mb,
                             confirm=ask, kv=args.kv, model_type=args.type)
