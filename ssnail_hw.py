@@ -409,6 +409,45 @@ def ssm_update(h, a, u, B):
     return (t + s).astype(F32)
 
 
+def vrecip(x):
+    """1 / x per element, correctly rounded F32 (the divider)."""
+    x = np.asarray(x, dtype=F32)
+    with np.errstate(divide="ignore", over="ignore"):
+        return (F32(1) / x).astype(F32)
+
+
+def cvti16(x, s):
+    """int16(roundf(F32(x * s))), saturated; NaN gives 0 (the FPU's
+    saturating roundf, then a 16-bit saturation)."""
+    t = (np.asarray(x, dtype=F32) * F32(s)).astype(F32)
+    t = np.clip(t, F32(-1e6), F32(1e6))                 # (saturates alike; inf too)
+    with np.errstate(invalid="ignore"):
+        r = roundf(t).astype(np.float64)
+    r = np.where(np.isnan(r), 0.0, np.clip(r, -32768, 32767))
+    return r.astype(np.int16)
+
+
+def flt(a, b):
+    """The hardware's F32 a < b, on the bits: -0 = +0; sign, then magnitude
+    (so NaNs order by their bits, unlike IEEE)."""
+    a = np.asarray(a, dtype=F32).view(np.uint32)
+    b = np.asarray(b, dtype=F32).view(np.uint32)
+    am, bm = a & 0x7FFFFFFF, b & 0x7FFFFFFF
+    asg, bsg = a >> 31, b >> 31
+    lt = np.where(asg != bsg, asg == 1, np.where(asg == 0, am < bm, am > bm))
+    return lt & ~((am == 0) & (bm == 0))
+
+
+def vmax(x, y):
+    x, y = np.asarray(x, dtype=F32), np.asarray(y, dtype=F32)
+    return np.where(flt(x, y), y, x).astype(F32)
+
+
+def vmin(x, y):
+    x, y = np.asarray(x, dtype=F32), np.asarray(y, dtype=F32)
+    return np.where(flt(y, x), y, x).astype(F32)
+
+
 def meanrows(M):
     """Column-wise sequential sums over the rows, times recip(rows)."""
     M = np.asarray(M, dtype=F32)

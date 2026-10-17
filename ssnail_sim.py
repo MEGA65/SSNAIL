@@ -248,6 +248,20 @@ class Machine:
                 else:
                     r = (av[:, None] * h + uv[:, None] * bv[None, :]).astype(np.float32)
                 self.put_f32v(ha, r.reshape(-1))
+            elif op == I.VRECIP:
+                p = self.f32v(self.ea(x), N0)
+                if self.hw:
+                    r = H.vrecip(p)
+                else:
+                    with np.errstate(divide="ignore"):
+                        r = (1.0 / p.astype(np.float64)).astype(np.float32)
+                self.put_f32v(self.ea(z), r)
+            elif op == I.VCVTI16:
+                s = np.frombuffer(struct.pack("<I", N2 & 0xFFFFFFFF), dtype="<f4")[0]
+                self.write(self.ea(z), H.cvti16(self.f32v(self.ea(x), N0), s).astype("<i2").tobytes())
+            elif op in (I.VMAX, I.VMIN):
+                p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
+                self.put_f32v(self.ea(z), H.vmax(p, q) if op == I.VMAX else H.vmin(p, q))
             elif op == I.MEANROWS:
                 rows = self.reg(a)
                 M = self.f32v(self.ea(x), rows * N0).reshape(rows, N0)

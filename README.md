@@ -374,6 +374,10 @@ N0–N2 (lengths, set by SETN).
 | $2A | VEXP | Z = exp(X) (N0 f32), the softmax's exp table: X ≥ 0 gives 1 (Mamba-2's dA = exp(dt·A), A < 0) |
 | $2B | SOFTPLUS | Z = log(1 + exp(X)) (N0 f32), a table (Mamba-2's dt) |
 | $2C | SSMUPD | Mamba-2 state update: addr(X) is a 4 × u32 parameter block (h, a, u, B); for r < N1, c < N0: h[r][c] = a[r]·h[r][c] + u[r]·B[c], h in place (N1 rows of N0 f32).  The block and arrays 4-byte aligned, N1 < 65536 |
+| $2E | VRECIP | Z = 1 / X (N0 f32), correctly rounded |
+| $2F | VCVTI16 | Z (N0 × int16) = roundf(X · s), saturated, with s = N2 as f32 bits (roundf: half away from zero; NaN gives 0): screen coordinates |
+| $30 | VMAX | Z = Y where X < Y, else X (N0 f32; −0 and +0 compare equal) |
+| $31 | VMIN | Z = Y where Y < X, else X |
 
 GEMV flag `b` bit 1 writes y as F16 instead of F32.  The ATTN parameter
 block's sixth word is the KV cache format: 0 F32, 1 F16.

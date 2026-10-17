@@ -65,13 +65,20 @@ SSMUPD = 0x2C   # state update: addr(X) = parameter block (h, a, u, B: 4 x u32);
                 # for r < N1, c < N0: h[r][c] = a[r] * h[r][c] + u[r] * B[c]
                 # (h: N1 x N0 f32 rows, in place; a, u: N1 f32; B: N0 f32;
                 # the block and the arrays 4-byte aligned, N1 < 65536)
+# Geometry (vertex transforms are GEMVs; these finish them):
+VRECIP = 0x2E   # Z = 1 / X (N0 f32), correctly rounded
+VCVTI16 = 0x2F  # Z (N0 x int16) = roundf(X * s), saturated to int16; s = N2 as
+                # f32 bits; roundf: half away from zero; NaN gives 0
+VMAX = 0x30     # Z = Y where X < Y, else X (N0 f32; -0 = +0 compare equal)
+VMIN = 0x31     # Z = Y where Y < X, else X
 
 OPNAMES = {v: k for k, v in dict(
     NOP=NOP, HALT=HALT, SYNC=SYNC, COPY=COPY, SETN=SETN, LI=LI, LDR=LDR,
     STR=STR, ADDI=ADDI, LEA=LEA, BEQ=BEQ, BNE=BNE, BLT=BLT, GEMV=GEMV,
     DEQROW=DEQROW, ARGMAX=ARGMAX, VADD=VADD, VMUL=VMUL, RMSNORM=RMSNORM,
     SILUMUL=SILUMUL, ROPE=ROPE, ATTN=ATTN, LAYERNORM=LAYERNORM, GELU=GELU,
-    MEANROWS=MEANROWS, CVT16=CVT16, VEXP=VEXP, SOFTPLUS=SOFTPLUS, SSMUPD=SSMUPD).items()}
+    MEANROWS=MEANROWS, CVT16=CVT16, VEXP=VEXP, SOFTPLUS=SOFTPLUS, SSMUPD=SSMUPD,
+    VRECIP=VRECIP, VCVTI16=VCVTI16, VMAX=VMAX, VMIN=VMIN).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
 GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)
