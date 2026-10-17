@@ -40,7 +40,7 @@ def fake_get_json(url, timeout=30):
 
 F.get_json = fake_get_json
 out = io.StringIO()
-sys.argv = ["ssnail_findmodels.py", "anything"]
+sys.argv = ["ssnail_findmodels.py", "--encoders", "anything"]   # (encoders: the MiniLM case)
 with redirect_stdout(out), redirect_stderr(io.StringIO()):
     F.main()
 text = out.getvalue()

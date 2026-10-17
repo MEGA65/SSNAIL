@@ -48,7 +48,7 @@ FMT_BY_NAME = {"f32": I.FMT_F32, "f16": I.FMT_F16, "bf16": I.FMT_BF16,
                "mxfp4": I.FMT_MXFP4, "q4_k": I.FMT_Q4_K, "q6_k": I.FMT_Q6_K,
                "iq4_nl": I.FMT_IQ4_NL, "iq2_xxs": I.FMT_IQ2_XXS, "iq2_xs": I.FMT_IQ2_XS,
                "iq2_s": I.FMT_IQ2_S, "iq3_xxs": I.FMT_IQ3_XXS, "iq3_s": I.FMT_IQ3_S}
-ARCHES = ("llama", "gpt2", "bert")
+ARCHES = ("llama", "gpt2", "bert", "falcon-h1")
 DEQROW_TENSORS = ("token_embd.weight", "position_embd.weight", "token_types.weight")
 
 
@@ -164,9 +164,14 @@ def params(m):
         ctx_train=m.af("context_length", 2048),
     )
     p["n_kv_heads"] = m.af("attention.head_count_kv", p["n_heads"])
-    if m.arch == "llama":
+    if m.arch in ("llama", "falcon-h1"):
         p["eps"] = m.af("attention.layer_norm_rms_epsilon", 1e-5)
         p["rope_base"] = m.af("rope.freq_base", 10000.0)
+    if m.arch == "falcon-h1":
+        p["d_ssm"] = m.af("ssm.inner_size")
+        p["d_state"] = m.af("ssm.state_size")
+        p["ssm_heads"] = m.af("ssm.time_step_rank")
+        p["d_conv"] = m.af("ssm.conv_kernel")
     else:
         p["eps"] = m.af("attention.layer_norm_epsilon", 1e-5)
     if m.arch == "bert":
@@ -236,6 +241,55 @@ def special_flags(m):
         out.append(tt in (2, 3, 5) or t in ("<s>", "</s>", "<unk>", "[CLS]", "[SEP]",
                                             "[PAD]", "[UNK]", "[MASK]"))
     return out
+
+
+def chat_template_parts(m):
+    """The GGUF's chat template around one user message: (prefix ids, suffix
+    ids, stop id), the template rendered with a sentinel as the message and
+    each side tokenized with its special tokens; the stop token is the
+    suffix's first special one (it ends a turn, the model's too).  None if
+    there is no template (or jinja2 is missing, or it won't render)."""
+    tpl = m.field("tokenizer.chat_template")
+    if not tpl:
+        return None
+    try:
+        import jinja2
+        env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)   # (as transformers)
+        env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
+        tokens = m.field("tokenizer.ggml.tokens")
+        bos = m.field("tokenizer.ggml.bos_token_id")
+        eos = m.field("tokenizer.ggml.eos_token_id")
+        SENT = "\u2063SSNAIL\u2063"
+        text = env.from_string(tpl).render(
+            messages=[{"role": "user", "content": SENT}], add_generation_prompt=True,
+            bos_token=tokens[bos] if bos is not None else "", eos_token=tokens[eos] if eos is not None else "")
+    except Exception:
+        return None
+    if text.count(SENT) != 1:
+        return None
+    pre, post = text.split(SENT)
+    specials = {t: i for i, (t, sp) in enumerate(zip(tokens, special_flags(m))) if sp and len(t) > 1}
+    def tok(part):
+        ids, i, plain = [], 0, ""
+        while i < len(part):
+            hit = next((t for t in sorted(specials, key=len, reverse=True) if part.startswith(t, i)), None)
+            if hit:
+                if plain:
+                    ids += encode(m, plain, bos=False)
+                    plain = ""
+                ids.append(specials[hit])
+                i += len(hit)
+            else:
+                plain += part[i]
+                i += 1
+        if plain:
+            ids += encode(m, plain, bos=False)
+        return ids
+    pre_ids, post_ids = tok(pre), tok(post)
+    stop = next((t for t in post_ids if tokens[t] in specials), None)
+    if stop is None:
+        return None
+    return pre_ids, post_ids, stop
 
 
 def wants_bos(m):
@@ -395,11 +449,12 @@ class Builder:
         self.host = None                 # (no separate segment any more)
         self.host_base = 0
         self.log = []
-        self.code_slots = 64 + 64 * p["n_layers"]
+        self.code_slots = 64 + (128 if m.arch == "falcon-h1" else 64) * p["n_layers"]
         self.code_addr = self.add(bytes(16 * self.code_slots), align=16)
         self.vocab()     # CPU-side tables early: in the first RAM on every board
         self.scratch = None
         self.tvec = self.tmpv = 0        # (sampling: decoders set them)
+        self.logit_scale = LOGIT_SCALE    # (falcon-h1: --logit-scale)
         self.A = Asm()
 
     @property
@@ -435,8 +490,10 @@ class Builder:
         self.data += blob
         return addr
 
-    def wt(self, name):
-        """Add a weight matrix; returns (fmt, address, bytes per row)."""
+    def wt(self, name, rows_perm=None):
+        """Add a weight matrix; returns (fmt, address, bytes per row).
+        rows_perm: the rows in this order (rows are independent in every
+        format, so their bytes simply move)."""
         m = self.m
         t = m.tensors[name]
         src = int(t.tensor_type)
@@ -465,6 +522,9 @@ class Builder:
             else:
                 blob = quantize(w, GGMLQuantizationType(fmt)).tobytes()
             rp = True
+        if rows_perm is not None:
+            rb = len(blob) // rows
+            blob = b"".join(blob[r * rb:(r + 1) * rb] for r in rows_perm)
         addr = self.add(blob)
         self.log.append((name, GGMLQuantizationType(src).name,
                          GGMLQuantizationType(fmt).name, len(blob), rp))
@@ -502,6 +562,15 @@ class Builder:
         offs.append(base + len(blob))
         self.vocab_addr = self.add_host(struct.pack(f"<{len(offs)}I", *offs) + bytes(blob))
         self.n_vocab = n = len(tokens)
+        # The chat template's wrapping of a user message, as token ids (the
+        # client sends prefix + typed text + suffix; the model's turn ends
+        # with the stop token)
+        cp = chat_template_parts(m) if m.arch != "bert" else None
+        self.chat_addr, self.chat_stop = 0, None
+        if cp:
+            pre, post, self.chat_stop = cp
+            self.chat_addr = self.add_host(struct.pack(f"<HH{len(pre) + len(post)}I", len(pre),
+                                                       len(post), *pre, *post))
 
         # Which tokens can appear when encoding typed (ASCII) text
         is_byte = [kind == "llama" and len(t) == 6 and t.startswith("<0x") and t.endswith(">")
@@ -629,8 +698,8 @@ class Builder:
         for f, v in ((I.H_HOST_BASE, 0), (I.H_HOST_LEN, 0),
                      (I.H_TOKENIZER, self.tok_addr),
                      (I.H_MEM_NEEDED, total), (I.H_ARCH, I.ARCH_CODES[m.arch]),
-                     (I.H_LOAD_BASE, self.base), (I.H_TVEC, self.tvec),
-                     (I.H_STAGING_SIZE, 0)):
+                     (I.H_LOAD_BASE, self.base), (I.H_TVEC, self.tvec), (I.H_CHAT, self.chat_addr),
+                     ):
             H[f:f + 4] = struct.pack("<I", v & 0xFFFFFFFF)
         memcfg = bytes(4)
         H[I.H_MEMCFG:I.H_MEMCFG + 4] = memcfg
@@ -767,7 +836,7 @@ def build_llama(b):
     tokens_addr = b.tokens()
     eps = I.f32_bits(p["eps"])
 
-    decoder_prologue(A, ctx, m.field("tokenizer.ggml.eos_token_id", 2))
+    decoder_prologue(A, ctx, b.chat_stop if b.chat_stop is not None else m.field("tokenizer.ggml.eos_token_id", 2))
     A(I.LEA, 0, R_POS, tokens_addr, z=4)
     A(I.LDR, R_TOK, x=a_[0])
     A(I.SETN, x=dim)
@@ -800,6 +869,201 @@ def build_llama(b):
         A(I.ATTN, R_POS, x=blocks[l], y=q, z=att)
         A(I.SETN, x=dim, y=dim)
         A(I.GEMV, W["wo"][0], I.GEMV_ACC, x=W["wo"][1], y=att, z=x)
+        A(I.SETN, x=dim, z=eps)
+        A(I.RMSNORM, x=x, y=W["ffn_norm"], z=xb)
+        A(I.SETN, x=dim, y=hidden)
+        A(I.GEMV, W["w1"][0], x=W["w1"][1], y=xb, z=hb)
+        A(I.GEMV, W["w3"][0], x=W["w3"][1], y=xb, z=hb2)
+        A(I.SETN, x=hidden)
+        A(I.SILUMUL, x=hb, y=hb2, z=hb)
+        A(I.SETN, x=hidden, y=dim)
+        A(I.GEMV, W["w2"][0], I.GEMV_ACC, x=W["w2"][1], y=hb, z=x)
+    A(I.SETN, x=dim, z=eps)
+    A(I.RMSNORM, x=x, y=out_norm, z=xb)
+    A(I.SETN, x=dim, y=vocab)
+    A(I.GEMV, cls[0], x=cls[1], y=xb, z=logits)
+    emit_sample(A, b, logits, vocab, noise)
+    A(I.SETN, x=vocab)
+    A(I.ARGMAX, R_NEXT, x=logits)
+    decoder_epilogue(A, tokens_addr)
+    return logits, vocab, 0
+
+
+# --- falcon-h1 --------------------------------------------------------------------
+# The logit scale llama.cpp's GGUFs leave out: lm_head_multiplier /
+# embedding_multiplier (the embedding's, folded into the tied token_embd,
+# reaches the logits too).  By (dim, layers); from the models' config.json.
+LOGIT_SCALE = None                 # --logit-scale (falcon-h1)
+FALCON_H1_LOGIT_SCALE = {(512, 24): 0.078125 / 0.11083984375}     # the Tiny 90M family
+
+
+def build_falcon_h1(b):
+    """Falcon-H1 (transformers' FalconH1, one token at a time): each layer's
+    attention and Mamba-2 branches read the same normed input and both add to
+    the residual; then a SwiGLU MLP.  The Mamba-2 recurrent state and the
+    conv history live in scratch, zeroed at position 0."""
+    m, p, A, ctx = b.m, b.p, b.A, b.ctx
+    dim, hd, kvd, hidden, vocab = p["dim"], p["head_dim"], p["kv_dim"], p["hidden"], p["vocab"]
+    dss, dst, nsh, dcv = p["d_ssm"], p["d_state"], p["ssm_heads"], p["d_conv"]
+    shd = dss // nsh                               # channels per SSM head
+    cdim = dss + 2 * dst                           # the conv's channels: x, B, C
+    nproj = dss + cdim + nsh                       # in_proj: z, xBC, dt
+    npad = 32                                      # per-head vectors, padded for GEMV
+    assert dcv == 4 and nsh <= npad and dst % 32 == 0
+    scale = b.logit_scale or FALCON_H1_LOGIT_SCALE.get((dim, p["n_layers"]))
+    if scale is None:
+        print(f"warning: no logit scale known for a {dim}-wide, {p['n_layers']}-layer Falcon-H1:"
+              " sampling temperatures will read differently (--logit-scale)")
+        scale = 1.0
+    # rotate-half RoPE (as transformers) -> SSNAIL's adjacent pairs: each
+    # head's rows (i, i + hd/2) become (2i, 2i + 1), in q and in k alike
+    half = hd // 2
+    perm_head = [j for i in range(half) for j in (i, i + half)]
+    perm = lambda n: [h * hd + j for h in range(n // hd) for j in perm_head]
+    f32 = lambda v: np.asarray(v, dtype="<f4").tobytes()
+    embd = b.wt("token_embd.weight")
+    L = []
+    for l in range(p["n_layers"]):
+        g = lambda n, s="weight": f"blk.{l}.{n}.{s}" if s else f"blk.{l}.{n}"
+        conv = m.tensor_f32(g("ssm_conv1d")).reshape(cdim, dcv)      # [channel][k], k = 0 oldest
+        A_ = m.tensor_f32(g("ssm_a", None))
+        D_ = m.tensor_f32(g("ssm_d", None))
+        L.append(dict(
+            attn_norm=b.vec(g("attn_norm")), ffn_norm=b.vec(g("ffn_norm", None)),
+            wq=b.wt(g("attn_q"), perm(dim)), wk=b.wt(g("attn_k"), perm(kvd)),
+            wv=b.wt(g("attn_v")), wo=b.wt(g("attn_output")),
+            w1=b.wt(g("ffn_gate")), w3=b.wt(g("ffn_up")), w2=b.wt(g("ffn_down")),
+            win=b.wt(g("ssm_in")), wout=b.wt(g("ssm_out")),
+            cw=[b.add(f32(conv[:, k])) for k in range(dcv)],
+            cb=b.add(f32(m.tensor_f32(g("ssm_conv1d", "bias")))),
+            dtb=b.add(f32(np.pad(m.tensor_f32(g("ssm_dt", "bias")), (0, npad - nsh)))),
+            a=b.add(f32(np.pad(A_, (0, npad - nsh)))),
+            dexp=b.add(f32(np.repeat(D_, shd)))))
+    out_norm = b.add(f32(m.tensor_f32("output_norm.weight") * scale))
+    cls = b.wt("output.weight") if m.has("output.weight") else embd
+    E = np.zeros((dss, npad), dtype=np.float32)
+    E[np.arange(dss), np.arange(dss) // shd] = 1.0
+    expand = (I.FMT_F16, b.add(E.astype("<f2").tobytes()), 2 * npad)
+    ones = b.add(f32(np.ones(cdim)))
+    ZB = 32768
+    zeros = b.add(bytes(ZB), align=256)
+    j = np.arange(hd // 2, dtype=np.float64)
+    ang = np.arange(ctx, dtype=np.float64)[:, None] * (1.0 / p["rope_base"] ** (2 * j / hd))[None, :]
+    rope = b.add(np.stack([np.cos(ang), np.sin(ang)], axis=-1).astype("<f4").tobytes())
+    blocks = [b.add(bytes(32)) for _ in L]
+    ssm_blocks = [b.add(bytes(16)) for _ in L]
+    noise = sampling_tables(b, vocab)
+    b.end_of_file()
+    x, xb, q, att = (b.salloc(4 * dim) for _ in range(4))
+    kscr = b.salloc(4 * kvd)
+    hb, hb2 = b.salloc(4 * hidden), b.salloc(4 * hidden)
+    proj = b.salloc(4 * nproj)
+    u, t = b.salloc(4 * cdim), b.salloc(4 * cdim)
+    dtx, dax, uu, y = (b.salloc(4 * dss) for _ in range(4))
+    logits = b.salloc(4 * vocab)
+    b.tvec, b.tmpv = b.salloc(4 * vocab), b.salloc(4 * vocab)
+    esz = b.kv_esz
+    kc = [b.salloc(esz * ctx * kvd) for _ in L]
+    vc = [b.salloc(esz * ctx * kvd) for _ in L]
+    # the recurrent state, contiguous (zeroed at position 0): per layer the
+    # SSM state h (dss x dst), the conv history (3 x cdim, oldest first) and
+    # the padded dt / dA vectors (whose padding must read 0)
+    st_bytes = 4 * (dss * dst + (dcv - 1) * cdim + 2 * npad)
+    st_bytes = (st_bytes + ZB - 1) // ZB * ZB
+    state0 = b.salloc(st_bytes * len(L))
+    for l, blk in enumerate(blocks):
+        b.patch(blk, struct.pack("<8I", kc[l], vc[l], p["n_heads"], p["n_kv_heads"], hd,
+                                 b.kv_fmt, 0, 0))
+    S = []
+    for l in range(len(L)):
+        h = state0 + l * st_bytes
+        hist = h + 4 * dss * dst
+        dtp = hist + 4 * (dcv - 1) * cdim
+        dap = dtp + 4 * npad
+        S.append(dict(h=h, hist=[hist + 4 * cdim * k for k in range(dcv - 1)], dtp=dtp, dap=dap))
+        b.patch(ssm_blocks[l], struct.pack("<4I", h, dax, uu, u + 4 * dss))
+    tokens_addr = b.tokens()
+    eps = I.f32_bits(p["eps"])
+
+    decoder_prologue(A, ctx, b.chat_stop if b.chat_stop is not None else m.field("tokenizer.ggml.eos_token_id", 2))
+    # position 0: a new sequence, so a zero recurrent state
+    A(I.BNE, R_POS, I.RZERO, "warm")
+    A(I.LI, R_T, z=0)
+    A(I.LI, R_N, z=st_bytes * len(L) // ZB)
+    A.label("zero")
+    A(I.LEA, 5, R_T, state0, z=ZB)
+    A(I.COPY, x=zeros, y=a_[5], z=ZB & 0xFFFF)
+    A(I.ADDI, R_T, R_T, z=1)
+    A(I.BLT, R_T, R_N, "zero")
+    A.label("warm")
+    A(I.LEA, 0, R_POS, tokens_addr, z=4)
+    A(I.LDR, R_TOK, x=a_[0])
+    A(I.SETN, x=dim)
+    A(I.LEA, 1, R_TOK, embd[1], z=embd[2])
+    A(I.DEQROW, embd[0], x=a_[1], z=x)
+    A(I.LEA, 2, R_POS, rope, z=4 * hd)
+    xs, Bv, Cv = u, u + 4 * dss, u + 4 * (dss + dst)
+    zv, xbc, dtv = proj, proj + 4 * dss, proj + 4 * (dss + cdim)
+    for l, W in enumerate(L):
+        st = S[l]
+        A(I.SETN, x=dim, z=eps)
+        A(I.RMSNORM, x=x, y=W["attn_norm"], z=xb)
+        # --- Mamba-2
+        A(I.SETN, x=dim, y=nproj)
+        A(I.GEMV, W["win"][0], x=W["win"][1], y=xb, z=proj)
+        A(I.SETN, x=cdim)                      # causal conv over the last 4 xBC
+        A(I.VMUL, x=W["cw"][3], y=xbc, z=u)
+        for k in range(dcv - 1):
+            A(I.VMUL, x=W["cw"][k], y=st["hist"][k], z=t)
+            A(I.VADD, x=u, y=t, z=u)
+        A(I.VADD, x=u, y=W["cb"], z=u)
+        for k in range(dcv - 2):               # the history moves on
+            A(I.COPY, x=st["hist"][k + 1], y=st["hist"][k], z=4 * cdim)
+        A(I.COPY, x=xbc, y=st["hist"][dcv - 2], z=4 * cdim)
+        A(I.SILUMUL, x=u, y=ones, z=u)         # x, B, C = silu(conv)
+        A(I.SETN, x=nsh)
+        A(I.VADD, x=dtv, y=W["dtb"], z=st["dtp"])
+        A(I.SOFTPLUS, x=st["dtp"], z=st["dtp"])
+        A(I.VMUL, x=st["dtp"], y=W["a"], z=st["dap"])
+        A(I.VEXP, x=st["dap"], z=st["dap"])  # dA = exp(dt A)
+        A(I.SETN, x=npad, y=dss)               # per head -> per channel
+        A(I.GEMV, expand[0], x=expand[1], y=st["dtp"], z=dtx)
+        A(I.GEMV, expand[0], x=expand[1], y=st["dap"], z=dax)
+        A(I.SETN, x=dss)
+        A(I.VMUL, x=dtx, y=xs, z=uu)           # dt x
+        A(I.SETN, x=dst, y=dss)
+        A(I.SSMUPD, x=ssm_blocks[l])           # h = dA h + (dt x) B
+        A(I.GEMV, I.FMT_F32, x=st["h"], y=Cv, z=y)   # y = h C
+        A(I.SETN, x=dss)
+        A(I.VMUL, x=W["dexp"], y=xs, z=t)
+        A(I.VADD, x=y, y=t, z=y)               # + D x
+        A(I.SILUMUL, x=zv, y=y, z=y)           # * silu(z)
+        A(I.SETN, x=dss, y=dim)
+        A(I.GEMV, W["wout"][0], I.GEMV_ACC, x=W["wout"][1], y=y, z=x)
+        # --- attention, on the same xb
+        A(I.SETN, x=dim, y=dim)
+        A(I.GEMV, W["wq"][0], x=W["wq"][1], y=xb, z=q)
+        A(I.SETN, x=dim, y=kvd)
+        A(I.LEA, 3, R_POS, kc[l], z=esz * kvd)
+        A(I.LEA, 4, R_POS, vc[l], z=esz * kvd)
+        if b.kv16:
+            A(I.GEMV, W["wk"][0], x=W["wk"][1], y=xb, z=kscr)
+            A(I.GEMV, W["wv"][0], I.GEMV_F16OUT, x=W["wv"][1], y=xb, z=a_[4])
+        else:
+            A(I.GEMV, W["wk"][0], x=W["wk"][1], y=xb, z=a_[3])
+            A(I.GEMV, W["wv"][0], x=W["wv"][1], y=xb, z=a_[4])
+        A(I.SETN, x=dim, y=hd)
+        A(I.ROPE, x=q, y=a_[2])
+        A(I.SETN, x=kvd, y=hd)
+        if b.kv16:
+            A(I.ROPE, x=kscr, y=a_[2])
+            A(I.CVT16, x=kscr, z=a_[3])
+        else:
+            A(I.ROPE, x=a_[3], y=a_[2])
+        A(I.ATTN, R_POS, x=blocks[l], y=q, z=att)
+        A(I.SETN, x=dim, y=dim)
+        A(I.GEMV, W["wo"][0], I.GEMV_ACC, x=W["wo"][1], y=att, z=x)
+        # --- MLP
         A(I.SETN, x=dim, z=eps)
         A(I.RMSNORM, x=x, y=W["ffn_norm"], z=xb)
         A(I.SETN, x=dim, y=hidden)
@@ -1035,7 +1299,7 @@ def build_bert(b):
     return out, dim, I.H_FLAG_ENCODER
 
 
-BUILDERS = dict(llama=build_llama, gpt2=build_gpt2, bert=build_bert)
+BUILDERS = {"llama": build_llama, "gpt2": build_gpt2, "bert": build_bert, "falcon-h1": build_falcon_h1}
 
 
 def convert(m, ctx, policy, fallback, hyperram_mb, verbose=True, confirm=None, kv="f16",
@@ -1110,6 +1374,9 @@ def main():
                    help="weight format: keep native formats; force one; 'mixed' (Q8_0 layers, "
                         "Q4_0 embedding/classifier); or 'auto' (best that fits: keep, q8_0, "
                         "mixed, q4_0; asks before going below the file's own precision)")
+    c.add_argument("--logit-scale", type=float,
+                   help="Falcon-H1: the logits' scale its GGUF leaves out (lm_head_multiplier / "
+                        "embedding_multiplier); known for the Tiny 90M models")
     c.add_argument("--within-train", action="store_true",
                    help="refuse a --ctx longer than the model's trained context (for "
                         "building context variants of many models)")
@@ -1133,6 +1400,8 @@ def main():
 
     m = Model(args.gguf)
     if args.cmd == "convert":
+        global LOGIT_SCALE
+        LOGIT_SCALE = args.logit_scale
         if args.within_train and args.ctx and args.ctx > params(m)["ctx_train"]:
             raise SystemExit(f"--ctx {args.ctx}: {args.gguf} is trained for "
                              f"{params(m)['ctx_train']} positions; not built")

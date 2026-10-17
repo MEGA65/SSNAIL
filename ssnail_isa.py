@@ -58,13 +58,19 @@ LAYERNORM = 0x26  # Z = (X - mean) * rsqrt(var + eps(N2)) * G + B;
 GELU = 0x27     # Z = gelu(X) (tanh approximation, as ggml)
 MEANROWS = 0x28 # Z = mean of R[a] rows of N0 f32 starting at addr(X)
 CVT16 = 0x29    # Z (N0 x F16) = X (N0 x F32), round to nearest even
+# Mamba-2 (Falcon-H1's SSM heads):
+VEXP = 0x2A     # Z = exp(X) (N0 f32), X <= 0: the exp table (softmax's); X >= 0 gives 1
+SOFTPLUS = 0x2B # Z = softplus(X) = log(1 + exp(X)) (N0 f32), a table
+SSMUPD = 0x2C   # state update: addr(X) = parameter block (h, a, u, B: 4 x u32);
+                # for r < N1, c < N0: h[r][c] = a[r] * h[r][c] + u[r] * B[c]
+                # (h: N1 x N0 f32 rows, in place; a, u: N1 f32; B: N0 f32)
 
 OPNAMES = {v: k for k, v in dict(
     NOP=NOP, HALT=HALT, SYNC=SYNC, COPY=COPY, SETN=SETN, LI=LI, LDR=LDR,
     STR=STR, ADDI=ADDI, LEA=LEA, BEQ=BEQ, BNE=BNE, BLT=BLT, GEMV=GEMV,
     DEQROW=DEQROW, ARGMAX=ARGMAX, VADD=VADD, VMUL=VMUL, RMSNORM=RMSNORM,
     SILUMUL=SILUMUL, ROPE=ROPE, ATTN=ATTN, LAYERNORM=LAYERNORM, GELU=GELU,
-    MEANROWS=MEANROWS, CVT16=CVT16).items()}
+    MEANROWS=MEANROWS, CVT16=CVT16, VEXP=VEXP, SOFTPLUS=SOFTPLUS, SSMUPD=SSMUPD).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
 GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)
@@ -141,8 +147,8 @@ H_PAYLOAD_LEN = 0x2C # bytes of payload in the file (after the 256-byte header)
 H_OUTPUT = 0x30      # address of the f32 output vector (logits, or the
                      #   pooled embedding for encoder models)
 H_OUTDIM = 0x34      # length of the output vector
-H_ARCH = 0x3C       # 0 llama, 1 gpt2, 2 bert
-ARCH_CODES = {"llama": 0, "gpt2": 1, "bert": 2}
+H_ARCH = 0x3C       # 0 llama, 1 gpt2, 2 bert, 3 falcon-h1
+ARCH_CODES = {"llama": 0, "gpt2": 1, "bert": 2, "falcon-h1": 3}
 H_MEM_NEEDED = 0x38  # bytes of linear memory the image needs from $8000000,
                      #   including scratch, KV cache and a full token buffer
 H_FLAG_ENCODER = 0x0001   # in the u16 flags: encoder (BERT) image
@@ -150,7 +156,8 @@ H_FLAG_ENCODER = 0x0001   # in the u16 flags: encoder (BERT) image
 H_MEMCFG = 0x60      # (unused: 0; SSNAIL's default region registers are right)
 H_LOAD_BASE = 0x64   # where the payload loads
 H_TVEC = 0x68        # sampling: address of the T vector (vocab x F32, the CPU fills it), 0 = none
-H_STAGING_SIZE = 0x6C  # (unused: 0)
+H_CHAT = 0x6C        # chat template: address of (u16 n_pre, u16 n_post, u32 pre ids..., u32 post ids...),
+                     #   the wrapping of a user message; 0 = none (plain text continuation)
 H_DESC = 0x80        # description, NUL-terminated UTF-8: "name (arch) [type]",
 H_DESC_SIZE = 0x80   #   type from convert --type (default General), up to $FF
 H_HOST_BASE = 0x70   # (unused: 0)

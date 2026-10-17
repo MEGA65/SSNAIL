@@ -227,6 +227,23 @@ class Machine:
             elif op == I.GELU:
                 p = self.f32v(self.ea(x), N0)
                 self.put_f32v(self.ea(z), H.gelu(p) if self.hw else gelu(p))
+            elif op in (I.VEXP, I.SOFTPLUS):
+                p = self.f32v(self.ea(x), N0)
+                if op == I.VEXP:
+                    r = H.vexp(p) if self.hw else np.exp(np.minimum(p.astype(np.float64), 0.0))
+                else:
+                    r = H.softplus(p) if self.hw else np.logaddexp(0.0, p.astype(np.float64))
+                self.put_f32v(self.ea(z), np.asarray(r, dtype=np.float32))
+            elif op == I.SSMUPD:
+                blk = self.ea(x)
+                ha, aa, ua, ba = struct.unpack("<4I", self.read(blk, 16))
+                h = self.f32v(ha, N1 * N0).reshape(N1, N0)
+                av, uv, bv = self.f32v(aa, N1), self.f32v(ua, N1), self.f32v(ba, N0)
+                if self.hw:
+                    r = H.ssm_update(h, av, uv, bv)
+                else:
+                    r = (av[:, None] * h + uv[:, None] * bv[None, :]).astype(np.float32)
+                self.put_f32v(ha, r.reshape(-1))
             elif op == I.MEANROWS:
                 rows = self.reg(a)
                 M = self.f32v(self.ea(x), rows * N0).reshape(rows, N0)

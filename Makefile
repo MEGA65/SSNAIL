@@ -86,7 +86,7 @@ LIBC_SRC      = $(addprefix $(LIBC)/src/,memory.c targets.c llvm/fileio.s llvm/d
 CLIENT_SRC    = $(addprefix $(SSNAIL_TOOLS)client/,ssnail_chat.c ssnail_tokc.c ssnail_tokc.h)
 M65WRAP       = $(SSNAIL_TOOLS)m65wrap/m65wrap
 
-.PHONY: test clean findmodels fetch modellist allmodels allmodels-images client tokcheck-c %.all %.chat %.run %.tokcheck
+.PHONY: test test-falcon clean findmodels fetch modellist allmodels allmodels-images client tokcheck-c %.all %.chat %.run %.tokcheck
 .PRECIOUS: %.ssnail
 
 %.ssnail: %.gguf $(TOOL_DEPS)
@@ -197,6 +197,10 @@ test:
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_pipeline.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_gpt2_bert.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_desc.py
+
+# Falcon-H1 against transformers and the reference (slow; needs the GGUF in models/)
+test-falcon:
+	$(PYTHON) $(SSNAIL_TOOLS)tests/test_falcon_h1.py
 
 clean:
 	rm -f *.ssnail

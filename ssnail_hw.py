@@ -356,6 +356,8 @@ _gelu = lambda x: 0.5 * x * (1 + np.tanh(0.7978845608028654 * (x + 0.044715 * x 
 SILU = Table(_silu, -12.0, 12.0, lambda x: np.zeros_like(x), lambda x: x)
 GELU = Table(_gelu, -6.0, 6.0, lambda x: np.zeros_like(x), lambda x: x)
 EXP = Table(np.exp, -16.0, 0.0, lambda x: np.zeros_like(x), lambda x: np.ones_like(x))
+_softplus = lambda x: np.log1p(np.exp(x))
+SOFTPLUS = Table(_softplus, -12.0, 12.0, lambda x: np.zeros_like(x), lambda x: x)
 
 
 # --- Vector operations -------------------------------------------------------------
@@ -387,6 +389,24 @@ def silumul(x, y):
 
 def gelu(x):
     return GELU(x)
+
+
+def vexp(x):
+    """The softmax's exp table (inputs <= 0; >= 0 gives 1)."""
+    return EXP(x)
+
+
+def softplus(x):
+    return SOFTPLUS(x)
+
+
+def ssm_update(h, a, u, B):
+    """h[r][c] = (a[r] * h[r][c]) + (u[r] * B[c]), each product and the sum
+    rounded to F32."""
+    h = np.asarray(h, dtype=F32)
+    t = (np.asarray(a, dtype=F32)[:, None] * h).astype(F32)
+    s = (np.asarray(u, dtype=F32)[:, None] * np.asarray(B, dtype=F32)[None, :]).astype(F32)
+    return (t + s).astype(F32)
 
 
 def meanrows(M):
