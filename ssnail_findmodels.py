@@ -28,9 +28,16 @@ import urllib.parse
 import urllib.request
 
 API = "https://huggingface.co/api"
-SUPPORTED = ("llama", "gpt2", "bert")
-DEFAULT_QUERIES = ["tinystories", "smollm", "minilm", "bert-tiny", "bert-mini",
-                   "tinyllama", "stories15m", "stories260k", "gpt2"]
+SUPPORTED = ("llama", "gpt2", "falcon-h1")    # decoders: what the MEGA65 client chats with
+ENCODERS = ("bert",)                           # listed only with --encoders
+DEFAULT_QUERIES = ["tinystories", "smollm", "tinyllama", "stories15m", "stories260k", "gpt2",
+                   "falcon-h1-tiny"]
+ENCODER_QUERIES = ["minilm", "bert-tiny", "bert-mini"]
+# Models found not to work (by base_name: every quantisation of them): broken files
+# (TinyStories-LLaMA2-20M-256h-4l-GQA gives nonsense even in an independent
+# reference), or architectures the converter can't read (mixture of experts, ...)
+BROKEN = {"tinystories-llama2-20m-256h-4l-gqa", "stories15m-moe", "stories260k-infill",
+          "stories15m-quant-ds", "minilmv2-bertscore-distilled"}
 
 # Bits per weight by quantisation tag in a filename, for estimating parameter
 # counts when the API does not report them.
@@ -80,6 +87,8 @@ def guess_arch(repo, files):
     s = (repo + " " + " ".join(f for f, _ in files)).lower()
     if "bert" in s or "minilm" in s or "mpnet" in s or "e5-" in s or "bge" in s:
         return "bert"
+    if "falcon-h1" in s:
+        return "falcon-h1"
     if "gpt2" in s or "gpt-2" in s or "tinystories-gpt" in s:
         return "gpt2"
     if any(k in s for k in ("llama", "smollm", "stories", "tinyllama", "mistral", "qwen")):
@@ -171,6 +180,10 @@ def main():
     ap.add_argument("--mem", type=int, choices=MEM_SIZES,
                     help="only show models estimated to fit this memory size")
     ap.add_argument("--limit", type=int, default=15, help="repositories per search term")
+    ap.add_argument("--encoders", action="store_true",
+                    help="also list encoders (BERT, MiniLM: embeddings, not text)")
+    ap.add_argument("--names", metavar="FILE",
+                    help="no search: print the file name of each URL in FILE (for make)")
     ap.add_argument("--all-arch", action="store_true",
                     help="also list architectures SSNAIL can't run yet")
     ap.add_argument("--fetch", metavar="FILE",
@@ -183,9 +196,17 @@ def main():
     args = ap.parse_args()
     if args.fetch:
         sys.exit(fetch_list(args.fetch, args.dir))
+    if args.names:
+        for line in open(args.names):
+            url = line.split("#")[0].strip()
+            if url:
+                print(urllib.parse.unquote(url.rstrip("/").split("/")[-1].split("?")[0]))
+        return
+    supported = SUPPORTED + (ENCODERS if args.encoders else ())
+    queries = args.queries or DEFAULT_QUERIES + (ENCODER_QUERIES if args.encoders else [])
 
     seen, rows = set(), []
-    for q in args.queries or DEFAULT_QUERIES:
+    for q in queries:
         try:
             models = search(q, args.limit)
         except (urllib.error.URLError, TimeoutError) as e:
@@ -200,7 +221,9 @@ def main():
             except (urllib.error.URLError, TimeoutError, ValueError):
                 continue
             arch, params, best, fits = assess(model, files)
-            ok_arch = arch and arch.rstrip("?") in SUPPORTED
+            ok_arch = arch and arch.rstrip("?") in supported
+            if best and base_name(best[0].split("/")[-1]) in BROKEN:
+                continue
             if not (ok_arch or args.all_arch) or not best:
                 continue
             if args.mem and not fits.get(args.mem):

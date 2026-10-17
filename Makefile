@@ -72,9 +72,10 @@ MODELS_OUT   ?= sdcard/SSNAIL
 MODELS_CTX   ?= 512 1024
 MODELS_MEM   ?= 64
 MODEL_LIST   := $(MODELS_DIR)/models.txt
-# (a split model's parts are not one GGUF the converter can read)
-MODEL_GGUFS   = $(filter-out %-of-00002.gguf %-of-00003.gguf %-of-00004.gguf %-of-00005.gguf,\
-                $(wildcard $(MODELS_DIR)/*.gguf))
+# The models the list names (fetched or put there by hand): other GGUFs in
+# MODELS_DIR are left alone
+MODEL_GGUFS   = $(filter $(wildcard $(MODELS_DIR)/*.gguf),$(addprefix $(MODELS_DIR)/,\
+                $(shell $(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py --names $(MODEL_LIST) 2>/dev/null)))
 
 LLVM_MOS     ?= /opt/llvm-mos
 # The client is a C64-mode program (the C64 memory map: no MAP games), with
