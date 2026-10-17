@@ -6,3 +6,4 @@ models/*
 sdcard/
 client/tok_host
 client/*.prg
+client/*.elf
