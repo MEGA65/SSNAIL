@@ -71,7 +71,8 @@ static uint8_t sector[512];
 static char buf[4 * 255 + 1];          /* a token's text, folded (one user at a time) */
 
 /* --- screen: an 80 x 50 text screen, output scrolling above the input line */
-#define SCR 0xF000U
+/* (in bank 5, written only by DMA: the CPU's $E000-$FFFF is the ROM's) */
+#define SCR 0x50000UL
 #define COL 0xFF80000UL
 #define TOP 3
 #define BOT 46                  /* last output row */
@@ -95,9 +96,9 @@ static uint8_t sc(uint8_t c)    /* ASCII -> screen code (lower-case set) */
 
 static void put_at(uint8_t x, uint8_t y, uint8_t colour, const char *s)
 {
-  uint16_t a = SCR + x + y * 80;
+  uint32_t a = SCR + x + y * 80;
   while (*s && x < 80) {
-    POKE(a, sc((uint8_t)*s++));
+    lpoke(a, sc((uint8_t)*s++));
     lpoke(COL + (a - SCR), colour);
     a++;
     x++;
@@ -125,7 +126,7 @@ static void out_char(char c)
   if (c == '\n') { out_newline(); return; }
   if (c == '\t') c = ' ';
   if (ox >= 80) out_newline();
-  POKE(SCR + ox + oy * 80, sc((uint8_t)c));
+  lpoke(SCR + ox + oy * 80, sc((uint8_t)c));
   lpoke(COL + ox + oy * 80, colour);
   ox++;
 }
@@ -160,7 +161,8 @@ static void screen_setup(void)
   POKE(0xD016, 0xC9);
   POKE(0xD058, 80); POKE(0xD059, 0);
   POKE(0xD05E, 80);
-  POKE(0xD060, 0x00); POKE(0xD061, 0xF0); POKE(0xD062, 0x00);
+  POKE(0xD060, SCR & 0xFF); POKE(0xD061, (SCR >> 8) & 0xFF); POKE(0xD062, (SCR >> 16) & 0xFF);
+  POKE(0xD063, (PEEK(0xD063) & 0xF0) | ((SCR >> 24) & 0x0F));
   POKE(0xD07B, 50);
   POKE(0xD020, 0); POKE(0xD021, 0);
   lfill(SCR, ' ', 4000);
@@ -515,10 +517,10 @@ static void read_line(char *buf, uint8_t max)
     if (c == 13) break;
     if ((c == 20 || c == 8) && n) {
       n--;
-      POKE(SCR + INROW * 80 + 2 + n, ' ');
+      lpoke(SCR + INROW * 80 + 2 + n, ' ');
     } else if (c >= 32 && c < 127 && n < max - 1 && n < 77) {
       buf[n] = c;
-      POKE(SCR + INROW * 80 + 2 + n, sc(c));
+      lpoke(SCR + INROW * 80 + 2 + n, sc(c));
       lpoke(COL + INROW * 80 + 2 + n, 1);
       n++;
     }
