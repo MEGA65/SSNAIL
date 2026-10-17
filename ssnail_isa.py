@@ -72,6 +72,11 @@ VCVTI16 = 0x2F  # Z (N0 x int16) = roundf(X * s), saturated to int16; s = N2 as
 VMAX = 0x30     # Z = Y where X < Y, else X (N0 f32; -0 = +0 compare equal)
 VMIN = 0x31     # Z = Y where Y < X, else X
 VSUB = 0x32     # Z = X - Y (N0 f32)
+# SHITE, the spreadsheet engine (docs/shite/README.md in mega65-core):
+RECALC = 0x40     # one recalculation round of the sheet at addr(X); R[a] = cells changed
+REBALANCE = 0x41  # rebuild the cell trees of rows R[a]..R[b] of the sheet at addr(X)
+FINDCELL = 0x42   # R[a] = the address of cell (row R[a], column R[b]), or 0
+FORMATCELLS = 0x43  # render cells as screen text: addr(X) = the parameter block
 VPROJ16 = 0x33  # Z (N0 x int16) = sat(roundf(X / Y * s + o)), each step F32;
                 # s = N2, o = N1 as f32 bits (x / w to screen coordinates)
 
@@ -82,7 +87,8 @@ OPNAMES = {v: k for k, v in dict(
     SILUMUL=SILUMUL, ROPE=ROPE, ATTN=ATTN, LAYERNORM=LAYERNORM, GELU=GELU,
     MEANROWS=MEANROWS, CVT16=CVT16, VEXP=VEXP, SOFTPLUS=SOFTPLUS, SSMUPD=SSMUPD,
     VRECIP=VRECIP, VCVTI16=VCVTI16, VMAX=VMAX, VMIN=VMIN, VSUB=VSUB,
-    VPROJ16=VPROJ16).items()}
+    VPROJ16=VPROJ16, RECALC=RECALC, REBALANCE=REBALANCE, FINDCELL=FINDCELL,
+    FORMATCELLS=FORMATCELLS).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
 GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)

@@ -206,6 +206,7 @@ test:
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_pipeline.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_gpt2_bert.py
 	$(PYTHON) $(SSNAIL_TOOLS)tests/test_desc.py
+	$(PYTHON) $(SSNAIL_TOOLS)tests/test_shite.py
 
 # Falcon-H1 against transformers and the reference (slow; needs the GGUF in models/)
 test-falcon:

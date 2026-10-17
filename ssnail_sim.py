@@ -269,6 +269,8 @@ class Machine:
             elif op in (I.VMAX, I.VMIN):
                 p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
                 self.put_f32v(self.ea(z), H.vmax(p, q) if op == I.VMAX else H.vmin(p, q))
+            elif op in (I.RECALC, I.REBALANCE, I.FINDCELL, I.FORMATCELLS):
+                self.shite(op, a, b, self.ea(x))
             elif op == I.MEANROWS:
                 rows = self.reg(a)
                 M = self.f32v(self.ea(x), rows * N0).reshape(rows, N0)
@@ -276,6 +278,22 @@ class Machine:
             else:
                 raise SsnailError(f"illegal opcode ${op:02X} at PC ${self.pc:07X}")
             self.pc = npc
+
+    def shite(self, op, a, b, desc):
+        """SHITE's instructions (shite.py), as SSNAIL runs them."""
+        import shite as SH
+        try:
+            if op == I.FINDCELL:
+                if a != I.RZERO:
+                    self.R[a] = SH.find_cell(self, desc, self.reg(a) & 0xFFFF, self.reg(b) & 0xFFFF)
+            elif op == I.REBALANCE:
+                SH.rebalance_row(self, desc, self.reg(a) & 0xFFFF, self.reg(b) & 0xFFFF)
+            else:
+                raise SsnailError(f"SHITE op ${op:02X} not in this model yet")
+        except SH.ShiteFormatError as e:
+            if self.read(desc, 4) == SH.MAGIC:
+                SH.put16(self, desc + SH.D_BADROW, e.row)
+            raise SsnailError(f"ERR_FORMAT: {e}")
 
     def recent_tokens(self, n):
         """The last n tokens of context (for the repetition penalty)."""
