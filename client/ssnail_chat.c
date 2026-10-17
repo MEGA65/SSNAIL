@@ -23,7 +23,12 @@
     /temp T      sampling temperature (0 = greedy, the default; 0.7-1.0 for stories)
     /seed [N]    a repeatable seed, or (no N) the moment Return is pressed
     /rows 25|50  the screen's height
-  Then plain text chats.  While generating, any key stops after this token.
+    /more        (or an empty line) carry on generating where the reply
+                 stopped: after a key stopped it, or at /len tokens
+  Then plain text chats; a chat model's text is wrapped in its chat template
+  (the image's, header $6C).  While SSNAIL generates (the border flickers),
+  any key asks it to stop after the current token; a second key aborts it
+  outright.  /more then carries on.  Shift + HOME clears the screen.
 */
 #include <stdint.h>
 #include <string.h>
@@ -113,6 +118,7 @@ static uint32_t parse_u(const char *s)
 #define R_NOISE 0x5C
 #define H_OUTDIM 0x34
 #define H_TVEC 0x68
+#define H_CHAT 0x6C
 #define NOISE_SPAN 4096
 
 #define MAXMODELS 64
@@ -560,7 +566,8 @@ static uint8_t load(uint8_t i)
 
 /* --- chat --------------------------------------------------------------- */
 #define MAXIN 96
-static uint32_t ids[MAXIN + 2];
+#define MAXIDS (MAXIN + 34)             /* typed text, and a chat template's wrapping */
+static uint32_t ids[MAXIDS];
 static uint8_t fresh = 1;               /* next prompt starts the context */
 static uint32_t pos, n_gen = 120;
 /* sampling: T in thousandths (0 = greedy); the T vector is filled once per
@@ -621,7 +628,20 @@ static void reply(const char *text)
 
   if (!image_there()) return;
 
-  n = tok_encode(text, fresh, ids, MAXIN + 2);
+  if (!*text) {                         /* continue: no new tokens */
+    if (fresh) { status(2, "nothing to continue: type something first"); return; }
+    n = 0;
+  } else if (rd32(IMG + H_CHAT)) {      /* a chat model: the template's wrapping */
+    uint32_t c = rd32(IMG + H_CHAT);
+    uint16_t npre = lpeek(c) | (lpeek(c + 1) << 8), npost = lpeek(c + 2) | (lpeek(c + 3) << 8);
+    if (npre + npost > MAXIDS - 8) { status(2, "the chat template is too long for this client"); return; }
+    for (i = 0; i < npre; i++) ids[i] = rd32(c + 4 + 4 * i);
+    n = npre + tok_encode(text, 0, ids + npre, MAXIDS - npre - npost);
+    for (i = 0; i < npost; i++) ids[n + i] = rd32(c + 4 + 4 * (npre + i));
+    n += npost;
+  } else {
+    n = tok_encode(text, fresh, ids, MAXIDS);
+  }
   at = fresh ? 0 : pos + 1;
   if (at + n + 1 >= ctx) { status(2, "context full: /new starts again"); return; }
   for (i = 0; i < n; i++) lp_write32(tokens + 4 * (at + i), ids[i]);
@@ -698,6 +718,11 @@ static void read_line(char *buf, uint8_t max)
     if (!c) continue;
     POKE(0xD610, 0);
     if (c == 13) { key_time = ((uint16_t)lpeek(0xFFD37FAUL) << 8) ^ PEEK(0xD012) ^ (n * 977u); break; }
+    if (c == 0x93) {                    /* shift + HOME (CLR): clear the screen, as on a C64 */
+      clear_rows(TOP, BOT);
+      ox = 0; oy = TOP;
+      continue;
+    }
     if ((c == 20 || c == 8) && n) {
       n--;
       lpoke(SCR + INROW * 80 + 2 + n, ' ');
@@ -952,6 +977,8 @@ int main(void)
   say(7, "/scan lists the models on the SD card (in /SSNAIL, else the root).");
   say(7, "/load N [direct|port|slow] loads one (direct, the default, DMAs into SDRAM).");
   say(7, "Then /check (or /verify, the whole image), /tok TEXT and /step; then type to chat.");
+  say(7, "While it writes, a key stops it after the current token (twice: at once);");
+  say(7, "/more or an empty line carries on.  /temp T samples; Shift+HOME clears the screen.");
   say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
   status(7, "ready");
   
@@ -960,7 +987,9 @@ int main(void)
   for (;;) {
     read_line(line, sizeof(line));
     if (line[0] == '/') {
-      if (!strncmp(line, "/models", 7)) list_models();
+      if (!strncmp(line, "/more", 5)) {
+        if (cur >= 0) reply("");
+      } else if (!strncmp(line, "/models", 7)) list_models();
       else if (!strncmp(line, "/regs", 5)) cmd_regs();
       else if (!strncmp(line, "/rows", 5)) {
         rows = parse_u(line + 5) == 25 ? 25 : 50;
@@ -1018,11 +1047,12 @@ int main(void)
       } else if (!strncmp(line, "/len ", 5)) {
         uint32_t v = parse_u(line + 5);
         if (v) n_gen = v;
-      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /verify /tok TEXT /step /new /len N /temp T /seed [N] /rows 25|50");
+      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /verify /tok TEXT /step /new /more /len N /temp T /seed [N] /rows 25|50");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }
     if (models[cur].arch == 2) { status(2, "an encoder (BERT): no text to generate"); continue; }
+    if (!line[0]) { reply(""); continue; }     /* (an empty line: more of the same) */
     colour = 7;
     out_text(line);
     out_newline();
