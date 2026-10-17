@@ -7,3 +7,5 @@ sdcard/
 client/tok_host
 client/*.prg
 client/*.elf
+m65wrap/m65wrap
+client/*.prg.elf

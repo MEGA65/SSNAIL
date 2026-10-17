@@ -77,9 +77,13 @@ MODEL_GGUFS   = $(filter-out %-of-00002.gguf %-of-00003.gguf %-of-00004.gguf %-o
                 $(wildcard $(MODELS_DIR)/*.gguf))
 
 LLVM_MOS     ?= /opt/llvm-mos
-MOS_CC        = $(LLVM_MOS)/bin/mos-mega65-clang
+# The client is a C64-mode program (the C64 memory map: no MAP games), with
+# the 45GS02's instructions, wrapped by m65wrap to start from MEGA65 mode
+MOS_CC        = $(LLVM_MOS)/bin/mos-c64-clang -mcpu=mos45gs02
 LIBC          = $(SSNAIL_TOOLS)mega65-libc
+LIBC_SRC      = $(addprefix $(LIBC)/src/,memory.c targets.c llvm/fileio.s llvm/dirent.s llvm/memory_asm.s)
 CLIENT_SRC    = $(addprefix $(SSNAIL_TOOLS)client/,ssnail_chat.c ssnail_tokc.c ssnail_tokc.h)
+M65WRAP       = $(SSNAIL_TOOLS)m65wrap/m65wrap
 
 .PHONY: test clean findmodels fetch modellist allmodels allmodels-images client tokcheck-c %.all %.chat %.run %.tokcheck
 .PRECIOUS: %.ssnail
@@ -156,13 +160,18 @@ $(foreach c,$(MODELS_CTX),$(eval $(call CTX_RULE,$(c))))
 
 client: $(SSNAIL_TOOLS)client/ssnailchat.prg sdcard/SSNCHAT.D81
 
-$(LIBC)/build/src/libmega65libc.a:
-	@test -f $(LIBC)/CMakeLists.txt || git -C $(SSNAIL_TOOLS) submodule update --init mega65-libc
-	cmake -DCMAKE_PREFIX_PATH=$(LLVM_MOS) -S $(LIBC) -B $(LIBC)/build > /dev/null
-	$(MAKE) -C $(LIBC)/build mega65libc
+$(LIBC)/include/mega65/memory.h:
+	git -C $(SSNAIL_TOOLS) submodule update --init mega65-libc
 
-$(SSNAIL_TOOLS)client/ssnailchat.prg: $(CLIENT_SRC) $(LIBC)/build/src/libmega65libc.a
-	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $(filter %.c,$^) $(LIBC)/build/src/libmega65libc.a
+$(M65WRAP): $(SSNAIL_TOOLS)m65wrap/m65wrap.c $(SSNAIL_TOOLS)m65wrap/c65toc64wrapper.h
+	cc -O2 -o $@ $<
+
+$(SSNAIL_TOOLS)client/ssnailchat64.prg: $(CLIENT_SRC) $(LIBC)/include/mega65/memory.h
+	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $(filter %.c,$(CLIENT_SRC)) $(LIBC_SRC)
+
+$(SSNAIL_TOOLS)client/ssnailchat.prg: $(SSNAIL_TOOLS)client/ssnailchat64.prg $(M65WRAP)
+	rm -f $@
+	$(M65WRAP) -o $@ $<
 
 sdcard/SSNCHAT.D81: $(SSNAIL_TOOLS)client/ssnailchat.prg
 	@mkdir -p sdcard

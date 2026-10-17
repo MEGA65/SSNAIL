@@ -53,7 +53,7 @@ void do_dma(void);              /* (mega65-libc's, not in its header) */
 #define R_STOP_REQUEST 0x50
 #define R_STOP_REASON 0x54
 
-#define MAXMODELS 24
+#define MAXMODELS 40
 #define NAMELEN 64
 
 struct model {
