@@ -167,7 +167,7 @@ $(M65WRAP): $(SSNAIL_TOOLS)m65wrap/m65wrap.c $(SSNAIL_TOOLS)m65wrap/c65toc64wrap
 	cc -O2 -o $@ $<
 
 $(SSNAIL_TOOLS)client/ssnailchat64.prg: $(CLIENT_SRC) $(LIBC)/include/mega65/memory.h
-	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $(filter %.c,$(CLIENT_SRC)) $(LIBC_SRC)
+	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $(filter %.c %.s,$(CLIENT_SRC)) $(LIBC_SRC)
 
 $(SSNAIL_TOOLS)client/ssnailchat.prg: $(SSNAIL_TOOLS)client/ssnailchat64.prg $(M65WRAP)
 	rm -f $@

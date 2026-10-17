@@ -769,6 +769,50 @@ static void cmd_check(void)
   }
 }
 
+/* the whole image, sector by sector, against the file */
+static void cmd_verify(void)
+{
+  static uint8_t ram[512];
+  char m[90];
+  uint8_t fd;
+  uint16_t n, i, firstsec = 1;
+  uint32_t off = 0, a, len, lb, bad = 0, first_bad = 0;
+  if (cur < 0) { say(2, "nothing loaded"); return; }
+  chdirroot();
+  if (models[cur].in_dir) chdir("SSNAIL");
+  fd = open(models[cur].name);
+  if (fd == 0xFF) { say(2, "can't open the file"); return; }
+  say(7, "verifying the whole image against the file (as slow as a load)...");
+  while ((n = read512(sector)) != 0) {
+    if (firstsec) {
+      lb = le32(sector + H_LOAD_BASE);
+      len = 256 + le32(sector + H_PAYLOAD_LEN);
+      (void)len;
+    }
+    for (i = 0; i < n; ) {                /* the file's bytes [off, off + n) */
+      uint32_t fo = off + i;
+      uint16_t k = n - i;
+      a = fo < 256 ? IMG + fo : lb + (fo - 256);
+      if (fo < 256 && fo + k > 256) k = 256 - (uint16_t)fo;
+      k = mb_room(a, k);
+      lcopy(a, (uint32_t)(uint16_t)ram, k);
+      { uint16_t j; for (j = 0; j < k; j++) if (ram[j] != sector[i + j]) {
+          if (!bad) first_bad = a + j;
+          bad++;
+          break;
+        } }
+      i += k;
+    }
+    off += n;
+    firstsec = 0;
+    flick();
+  }
+  close(fd);
+  POKE(0xD020, 5);
+  if (!bad) { sprintf(m, "all %lu bytes match the file", off); say(5, m); }
+  else { sprintf(m, "%lu chunks differ; the first at $%07lX", bad, first_bad); say(2, m); }
+}
+
 static void cmd_tok(const char *text)
 {
   static uint32_t t[64];
@@ -855,7 +899,7 @@ int main(void)
   out_newline();
   say(7, "/scan lists the models on the SD card (in /SSNAIL, else the root).");
   say(7, "/load N [direct|port|slow] loads one (direct, the default, DMAs into SDRAM).");
-  say(7, "Then /check, /tok TEXT and /step, one at a time; then type to chat.");
+  say(7, "Then /check (or /verify, the whole image), /tok TEXT and /step; then type to chat.");
   say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
   status(7, "ready");
   
@@ -894,13 +938,14 @@ int main(void)
           fresh = 1;
         }
       } else if (!strncmp(line, "/check", 6)) cmd_check();
+      else if (!strncmp(line, "/verify", 7)) cmd_verify();
       else if (!strncmp(line, "/tok ", 5)) cmd_tok(line + 5);
       else if (!strncmp(line, "/step", 5)) cmd_step();
       else if (!strncmp(line, "/new", 4)) { fresh = 1; status(5, "new story"); }
       else if (!strncmp(line, "/len ", 5)) {
         uint32_t v = parse_u(line + 5);
         if (v) n_gen = v;
-      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /tok TEXT /step /new /len N /rows 25|50");
+      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /verify /tok TEXT /step /new /len N /rows 25|50");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }
