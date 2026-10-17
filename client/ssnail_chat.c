@@ -164,9 +164,11 @@ static void screen_setup(void)
   POKE(0xD060, SCR & 0xFF); POKE(0xD061, (SCR >> 8) & 0xFF); POKE(0xD062, (SCR >> 16) & 0xFF);
   POKE(0xD063, (PEEK(0xD063) & 0xF0) | ((SCR >> 24) & 0x0F));
   POKE(0xD07B, 50);
-  POKE(0xD020, 0); POKE(0xD021, 0);
+  POKE(0xD021, 0);
+  POKE(0xD020, 8);
   lfill(SCR, ' ', 4000);
   lfill(COL, 1, 4000);
+  POKE(0xD020, 4);
   put_at(0, 0, 7, "SSNAIL chat");
   lfill(SCR + 47 * 80, 64 + 128, 80);   /* (a rule above the input line) */
   lfill(COL + 47 * 80, 11, 80);
@@ -697,11 +699,18 @@ int main(void)
   /* No KERNAL from here on (keys come from $D610, files from the
      hypervisor): its interrupt would otherwise run, and touch VIC and
      colour RAM, 60 times a second */
+  /* (the border shows how far start-up got: red, yellow, orange, purple,
+     then green once waiting for input) */
+  POKE(0xD020, 2);
   __asm__ volatile("sei");
   mega65_io_enable();
   POKE(0xD05D, PEEK(0xD05D) & 0x7F);    /* hot registers off: VIC-II writes
                                            leave the VIC-IV's settings alone */
+  POKE(0xD020, 7);
   screen_setup();
+
+  while(1) continue;
+  
   if (!ssnail_setup()) { status(2, "no SSNAIL in this bitstream"); for (;;) ; }
   cmd_found();
   cmd_regs();
@@ -711,6 +720,7 @@ int main(void)
   say(7, "Then /check, /tok TEXT and /step, one at a time; then type to chat.");
   say(7, "/hdr N shows a file's header, /regs SSNAIL's registers, /new a new story.");
   status(7, "ready");
+  POKE(0xD020, 5);
   (void)d;
   for (;;) {
     read_line(line, sizeof(line));
