@@ -25,6 +25,10 @@
 #   make modellist [QUERY=...]           # (re)write models/models.txt from a search
 #   make fetch URL=https://huggingface.co/.../resolve/main/foo.gguf
 #   make test
+#   make client                          # the MEGA65 chat front end: client/ssnailchat.prg,
+#                                        # and sdcard/SSNCHAT.D81 holding it (llvm-mos)
+#   make tokcheck-c                      # the client's tokenizer vs ssnail_tok.py, on
+#                                        # every image in MODELS_OUT
 #
 # The converter reads the architecture (llama, gpt2, bert) and tokenizer from
 # the GGUF itself, so one rule covers every model.  Images depend on the
@@ -72,7 +76,12 @@ MODEL_LIST   := $(MODELS_DIR)/models.txt
 MODEL_GGUFS   = $(filter-out %-of-00002.gguf %-of-00003.gguf %-of-00004.gguf %-of-00005.gguf,\
                 $(wildcard $(MODELS_DIR)/*.gguf))
 
-.PHONY: test clean findmodels fetch modellist allmodels allmodels-images %.all %.chat %.run %.tokcheck
+LLVM_MOS     ?= /opt/llvm-mos
+MOS_CC        = $(LLVM_MOS)/bin/mos-mega65-clang
+LIBC          = $(SSNAIL_TOOLS)mega65-libc
+CLIENT_SRC    = $(addprefix $(SSNAIL_TOOLS)client/,ssnail_chat.c ssnail_tokc.c ssnail_tokc.h)
+
+.PHONY: test clean findmodels fetch modellist allmodels allmodels-images client tokcheck-c %.all %.chat %.run %.tokcheck
 .PRECIOUS: %.ssnail
 
 %.ssnail: %.gguf $(TOOL_DEPS)
@@ -144,6 +153,27 @@ $(MODELS_OUT)/%.ctx$(1).ssnail: $(MODELS_DIR)/%.gguf $(TOOL_DEPS)
 	$$(CONVERT) convert $$< -o $$@ $$(MODEL_OPTS) --ctx $(1) --within-train </dev/null
 endef
 $(foreach c,$(MODELS_CTX),$(eval $(call CTX_RULE,$(c))))
+
+client: $(SSNAIL_TOOLS)client/ssnailchat.prg sdcard/SSNCHAT.D81
+
+$(LIBC)/build/src/libmega65libc.a:
+	@test -f $(LIBC)/CMakeLists.txt || git -C $(SSNAIL_TOOLS) submodule update --init mega65-libc
+	cmake -DCMAKE_PREFIX_PATH=$(LLVM_MOS) -S $(LIBC) -B $(LIBC)/build > /dev/null
+	$(MAKE) -C $(LIBC)/build mega65libc
+
+$(SSNAIL_TOOLS)client/ssnailchat.prg: $(CLIENT_SRC) $(LIBC)/build/src/libmega65libc.a
+	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $(filter %.c,$^) $(LIBC)/build/src/libmega65libc.a
+
+sdcard/SSNCHAT.D81: $(SSNAIL_TOOLS)client/ssnailchat.prg
+	@mkdir -p sdcard
+	rm -f $@
+	c1541 -format "ssnail chat,sc" d81 $@ -write $< "ssnail chat" > /dev/null
+
+$(SSNAIL_TOOLS)client/tok_host: $(SSNAIL_TOOLS)client/tok_host.c $(SSNAIL_TOOLS)client/ssnail_tokc.c
+	cc -O2 -Wall -Wno-unused-result -o $@ $^
+
+tokcheck-c: $(SSNAIL_TOOLS)client/tok_host
+	$(PYTHON) $(SSNAIL_TOOLS)client/tok_check.py $(wildcard $(MODELS_OUT)/*.ssnail)
 
 fetch:
 	@test -n "$(URL)" || { echo "usage: make fetch URL=https://huggingface.co/<repo>/resolve/main/<file>.gguf"; exit 1; }

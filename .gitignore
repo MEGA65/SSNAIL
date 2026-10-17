@@ -1,0 +1,8 @@
+__pycache__/
+*.gguf
+*.ssnail
+models/*
+!models/models.txt
+sdcard/
+client/tok_host
+client/*.prg
