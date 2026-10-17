@@ -149,8 +149,8 @@ H_FLAG_ENCODER = 0x0001   # in the u16 flags: encoder (BERT) image
 
 H_MEMCFG = 0x60      # (unused: 0; SSNAIL's default region registers are right)
 H_LOAD_BASE = 0x64   # where the payload loads
-H_STAGING = 0x68     # (unused: 0)
-H_STAGING_SIZE = 0x6C
+H_TVEC = 0x68        # sampling: address of the T vector (vocab x F32, the CPU fills it), 0 = none
+H_STAGING_SIZE = 0x6C  # (unused: 0)
 H_DESC = 0x80        # description, NUL-terminated UTF-8: "name (arch) [type]",
 H_DESC_SIZE = 0x80   #   type from convert --type (default General), up to $FF
 H_HOST_BASE = 0x70   # (unused: 0)
@@ -190,6 +190,16 @@ R_N_GENERATE = 0x48   # maximum tokens to generate in this run
 R_GENERATED = 0x4C    # tokens generated so far in this run
 R_STOP_REQUEST = 0x50 # CPU writes non-zero to stop after the current token
 R_STOP_REASON = 0x54  # 1 count reached, 2 EOS, 3 context full, 4 stop request
+R_SAMPLE = 0x58      # CPU: non-zero = sample (logits + T x noise, then argmax); 0 = greedy
+R_NOISE = 0x5C       # the noise window's offset (elements, < NOISE_SPAN): CPU seeds, script steps
+
+# Sampling (Gumbel-max): argmax(logits + T * g), g Gumbel noise, picks token i with
+# probability softmax(logits / T)[i].  The image holds NOISE_SPAN + vocab noise values
+# from a fixed seed; each token uses the window at R_NOISE, which steps by NOISE_STEP
+# (mod NOISE_SPAN).  The T vector holds T in every element (written by the CPU).
+NOISE_SPAN = 4096
+NOISE_STEP = 1031
+NOISE_SEED = 20261017
 
 STOP_COUNT, STOP_EOS, STOP_CTX_FULL, STOP_REQUESTED = 1, 2, 3, 4
 

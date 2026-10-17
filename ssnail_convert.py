@@ -399,6 +399,7 @@ class Builder:
         self.code_addr = self.add(bytes(16 * self.code_slots), align=16)
         self.vocab()     # CPU-side tables early: in the first RAM on every board
         self.scratch = None
+        self.tvec = self.tmpv = 0        # (sampling: decoders set them)
         self.A = Asm()
 
     @property
@@ -628,7 +629,7 @@ class Builder:
         for f, v in ((I.H_HOST_BASE, 0), (I.H_HOST_LEN, 0),
                      (I.H_TOKENIZER, self.tok_addr),
                      (I.H_MEM_NEEDED, total), (I.H_ARCH, I.ARCH_CODES[m.arch]),
-                     (I.H_LOAD_BASE, self.base), (I.H_STAGING, 0),
+                     (I.H_LOAD_BASE, self.base), (I.H_TVEC, self.tvec),
                      (I.H_STAGING_SIZE, 0)):
             H[f:f + 4] = struct.pack("<I", v & 0xFFFFFFFF)
         memcfg = bytes(4)
@@ -653,6 +654,8 @@ class Builder:
 
 # Register conventions used by the generated scripts
 R_POS, R_TOK, R_NEXT, R_PLEN, R_NGEN, R_EOS, R_POS1, R_REASON, R_GEN, R_CTX, R_TMP, R_T, R_N = range(13)
+R_SMP = 13          # sampling's noise offset (decoders)
+A_SMP = 7           # ... and its window
 RT = lambda f: I.HYPERRAM_BASE + f
 a_ = [I.reg_addr(i) for i in range(16)]
 
@@ -672,6 +675,33 @@ def decoder_prologue(A, ctx, eos):
     A(I.LI, R_REASON, z=I.STOP_CTX_FULL)
     A.jump("done")
     A.label("room")
+
+
+def sampling_tables(b, vocab):
+    """The noise table (in the file) and the T vector and a temporary (scratch):
+    call before end_of_file for the table; the scratch parts after."""
+    rng = np.random.default_rng(I.NOISE_SEED)
+    u = rng.random(I.NOISE_SPAN + vocab)
+    g = -np.log(-np.log(np.clip(u, 1e-12, 1 - 1e-12)))
+    return b.add(g.astype("<f4").tobytes())
+
+
+def emit_sample(A, b, logits, vocab, noise):
+    """Before ARGMAX: if R_SAMPLE, logits += T x noise[R_NOISE ...], R_NOISE steps."""
+    A(I.LDR, R_TMP, x=RT(I.R_SAMPLE))
+    A(I.BEQ, R_TMP, I.RZERO, "greedy")
+    A(I.LDR, R_SMP, x=RT(I.R_NOISE))
+    A(I.LEA, A_SMP, R_SMP, noise, z=4)
+    A(I.SETN, x=vocab)
+    A(I.VMUL, x=a_[A_SMP], y=b.tvec, z=b.tmpv)
+    A(I.VADD, x=logits, y=b.tmpv, z=logits)
+    A(I.ADDI, R_SMP, R_SMP, z=I.NOISE_STEP)
+    A(I.LI, R_TMP, z=I.NOISE_SPAN)
+    A(I.BLT, R_SMP, R_TMP, "noff")
+    A(I.ADDI, R_SMP, R_SMP, z=(-I.NOISE_SPAN) & 0xFFFFFFFF)
+    A.label("noff")
+    A(I.STR, R_SMP, x=RT(I.R_NOISE))
+    A.label("greedy")
 
 
 def decoder_epilogue(A, tokens_addr):
@@ -721,11 +751,13 @@ def build_llama(b):
     ang = np.arange(ctx, dtype=np.float64)[:, None] * (1.0 / p["rope_base"] ** (2 * j / hd))[None, :]
     rope = b.add(np.stack([np.cos(ang), np.sin(ang)], axis=-1).astype("<f4").tobytes())
     blocks = [b.add(bytes(32)) for _ in L]
+    noise = sampling_tables(b, vocab)
     b.end_of_file()
     x, xb, q, att = (b.salloc(4 * dim) for _ in range(4))
     kscr = b.salloc(4 * kvd)
     hb, hb2 = b.salloc(4 * hidden), b.salloc(4 * hidden)
     logits = b.salloc(4 * vocab)
+    b.tvec, b.tmpv = b.salloc(4 * vocab), b.salloc(4 * vocab)
     esz = b.kv_esz
     kc = [b.salloc(esz * ctx * kvd) for _ in L]
     vc = [b.salloc(esz * ctx * kvd) for _ in L]
@@ -781,6 +813,7 @@ def build_llama(b):
     A(I.RMSNORM, x=x, y=out_norm, z=xb)
     A(I.SETN, x=dim, y=vocab)
     A(I.GEMV, cls[0], x=cls[1], y=xb, z=logits)
+    emit_sample(A, b, logits, vocab, noise)
     A(I.SETN, x=vocab)
     A(I.ARGMAX, R_NEXT, x=logits)
     decoder_epilogue(A, tokens_addr)
@@ -806,10 +839,12 @@ def build_gpt2(b):
     lnf = b.vec("output_norm.weight", "output_norm.bias")
     cls = b.wt("output.weight") if m.has("output.weight") else wte
     blocks = [b.add(bytes(32)) for _ in L]
+    noise = sampling_tables(b, vocab)
     b.end_of_file()
     x, xb, q, att, tmp, kscr, vscr = (b.salloc(4 * dim) for _ in range(7))
     hb = b.salloc(4 * hidden)
     logits = b.salloc(4 * vocab)
+    b.tvec, b.tmpv = b.salloc(4 * vocab), b.salloc(4 * vocab)
     esz = b.kv_esz
     kc = [b.salloc(esz * ctx * dim) for _ in L]
     vc = [b.salloc(esz * ctx * dim) for _ in L]
@@ -866,6 +901,7 @@ def build_gpt2(b):
     A(I.LAYERNORM, x=x, y=lnf, z=xb)
     A(I.SETN, x=dim, y=vocab)
     A(I.GEMV, cls[0], x=cls[1], y=xb, z=logits)
+    emit_sample(A, b, logits, vocab, noise)
     A(I.SETN, x=vocab)
     A(I.ARGMAX, R_NEXT, x=logits)
     decoder_epilogue(A, tokens_addr)

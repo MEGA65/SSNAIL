@@ -136,13 +136,34 @@ class Session:
 
         m.on_sync = on_sync
         m.on_argmax = on_argmax
-        m.run(S.header(m, I.H_CODE))
+        # With hardware numerics, sampling is the image's own (as on the MEGA65:
+        # see hw_sampling); otherwise the emulator samples at ARGMAX
+        keep = m.temperature
+        if m.hw and m.temperature > 0 and S.header(m, I.H_TVEC):
+            hw_sampling(m, m.temperature, m.rng.integers(I.NOISE_SPAN))
+            m.temperature = 0.0
+        elif S.header(m, I.H_TVEC):
+            S.set_rt(m, I.R_SAMPLE, 0)
+        try:
+            m.run(S.header(m, I.H_CODE))
+        finally:
+            m.temperature = keep
         reason = S.header(m, I.R_STOP_REASON)
         print()
         if reason == I.STOP_EOS:
             print("[end of text]")
         elif reason == I.STOP_CTX_FULL:
             print(f"[context full at {S.header(m, I.H_MAXCTX)} tokens: /reset to start again]")
+
+
+def hw_sampling(m, t, seed):
+    """What the MEGA65 client does for a temperature t: the T vector filled with
+    t, sampling on, the noise window seeded"""
+    tvec = S.header(m, I.H_TVEC) - I.HYPERRAM_BASE
+    n = S.header(m, I.H_OUTDIM)
+    m.mem[tvec:tvec + 4 * n] = np.full(n, t, dtype="<f4").tobytes()
+    S.set_rt(m, I.R_SAMPLE, 1)
+    S.set_rt(m, I.R_NOISE, int(seed) % I.NOISE_SPAN)
 
 
 def main():

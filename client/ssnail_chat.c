@@ -20,6 +20,8 @@
     /tok TEXT    tokenize TEXT with the loaded image's tables, and back
     /step        one token: the script with n_generate = 1, and what it did
     /new         new story (context cleared)    /len N  reply length
+    /temp T      sampling temperature (0 = greedy, the default; 0.7-1.0 for stories)
+    /seed [N]    a repeatable seed, or (no N) the moment Return is pressed
     /rows 25|50  the screen's height
   Then plain text chats.  While generating, any key stops after this token.
 */
@@ -107,6 +109,11 @@ static uint32_t parse_u(const char *s)
 #define R_GENERATED 0x4C
 #define R_STOP_REQUEST 0x50
 #define R_STOP_REASON 0x54
+#define R_SAMPLE 0x58
+#define R_NOISE 0x5C
+#define H_OUTDIM 0x34
+#define H_TVEC 0x68
+#define NOISE_SPAN 4096
 
 #define MAXMODELS 64
 #define NAMELEN 64
@@ -123,6 +130,7 @@ static uint8_t n_models;
 static int8_t cur = -1;
 static uint32_t avail;
 static uint8_t sector[512];
+static uint8_t tvec_ok;                 /* the image's T vector holds the temperature */
 static char buf[4 * 255 + 1];          /* a token's text, folded (one user at a time) */
 
 /* --- screen: an 80 x 50 text screen, output scrolling above the input line */
@@ -543,6 +551,7 @@ static uint8_t load(uint8_t i)
     if (lp_error()) { status(2, "load port error (data outside SSNAIL's RAM)"); return 0; }
   }
   cur = i;
+  tvec_ok = 0;
   tok_init(IMG);
   sprintf(msg, "%s: %s", m->name, m->desc);
   row1(5, msg);
@@ -554,6 +563,52 @@ static uint8_t load(uint8_t i)
 static uint32_t ids[MAXIN + 2];
 static uint8_t fresh = 1;               /* next prompt starts the context */
 static uint32_t pos, n_gen = 120;
+/* sampling: T in thousandths (0 = greedy); the T vector is filled once per
+   load; the seed is /seed's, or the moment Return was pressed */
+static uint16_t temp_milli;
+static int32_t seed = -1;
+static uint16_t key_time;
+
+/* m / 1000 as F32 bits, rounded to nearest (integer long division: no float
+   library, which would leave no room for the stack); m > 0 */
+static uint32_t milli_to_f32(uint16_t m)
+{
+  uint32_t num = m, den = 1000, q = 0;
+  int8_t e = 0, i;
+  while (num >= 2 * den) { den <<= 1; e++; }
+  while (num < den) { num <<= 1; e--; }
+  for (i = 0; i < 24; i++) {            /* den <= num < 2 den: 24 bits of num / den */
+    q <<= 1;
+    if (num >= den) { num -= den; q |= 1; }
+    num <<= 1;
+  }
+  if (num >= den) {                     /* round half up */
+    q++;
+    if (q >> 24) { q >>= 1; e++; }
+  }
+  return ((uint32_t)(127 + e) << 23) | (q & 0x7FFFFFUL);
+}
+
+static uint8_t fill_tvec(void)
+{
+  static uint8_t b[512];
+  uint32_t tv = rd32(IMG + H_TVEC), n = rd32(IMG + H_OUTDIM) * 4;
+  uint32_t u;
+  uint16_t i;
+  if (!tv) { status(2, "this image has no sampling: rebuild it with the current converter"); return 0; }
+  u = milli_to_f32(temp_milli);
+  for (i = 0; i < 512; i += 4) {
+    b[i] = u; b[i + 1] = u >> 8; b[i + 2] = u >> 16; b[i + 3] = u >> 24;
+  }
+  dst = tv;                             /* (direct DMA, split at 1 MB boundaries) */
+  while (n) {
+    uint16_t k = n > 512 ? 512 : (uint16_t)n;
+    direct(b, k);
+    n -= k;
+  }
+  tvec_ok = 1;
+  return 1;
+}
 
 static void reply(const char *text)
 {
@@ -575,6 +630,12 @@ static void reply(const char *text)
   lp_write32(IMG + R_PROMPT_LEN, plen);
   lp_write32(IMG + R_N_GENERATE, n_gen);
   lp_write32(IMG + R_STOP_REQUEST, 0);
+  if (temp_milli && (tvec_ok || fill_tvec())) {
+    lp_write32(IMG + R_SAMPLE, 1);
+    lp_write32(IMG + R_NOISE, (uint32_t)(seed >= 0 ? (uint32_t)seed : key_time) % NOISE_SPAN);
+  } else if (rd32(IMG + H_TVEC)) {
+    lp_write32(IMG + R_SAMPLE, 0);
+  }
   if (fresh) fold_reset();
   fresh = 0;
   colour = 13;
@@ -636,7 +697,7 @@ static void read_line(char *buf, uint8_t max)
     uint8_t c = PEEK(0xD610);
     if (!c) continue;
     POKE(0xD610, 0);
-    if (c == 13) break;
+    if (c == 13) { key_time = ((uint16_t)lpeek(0xFFD37FAUL) << 8) ^ PEEK(0xD012) ^ (n * 977u); break; }
     if ((c == 20 || c == 8) && n) {
       n--;
       lpoke(SCR + INROW * 80 + 2 + n, ' ');
@@ -934,10 +995,30 @@ int main(void)
       else if (!strncmp(line, "/tok ", 5)) cmd_tok(line + 5);
       else if (!strncmp(line, "/step", 5)) cmd_step();
       else if (!strncmp(line, "/new", 4)) { fresh = 1; status(5, "new story"); }
-      else if (!strncmp(line, "/len ", 5)) {
+      else if (!strncmp(line, "/temp", 5)) {
+        const char *q = line + 5;
+        uint16_t ip = 0, fr = 0, sc = 1000;
+        char msg2[60];
+        while (*q == ' ') q++;
+        while (*q >= '0' && *q <= '9') ip = ip * 10 + (*q++ - '0');
+        if (*q == '.') { q++; while (*q >= '0' && *q <= '9' && sc > 1) { sc /= 10; fr += (*q++ - '0') * sc; } }
+        temp_milli = ip * 1000 + fr;
+        if (temp_milli > 5000) temp_milli = 5000;
+        tvec_ok = 0;
+        if (temp_milli) sprintf(msg2, "temperature %u.%03u (sampling)", temp_milli / 1000, temp_milli % 1000);
+        else sprintf(msg2, "temperature 0: greedy");
+        say(5, msg2);
+      } else if (!strncmp(line, "/seed", 5)) {
+        char msg2[60];
+        const char *q = line + 5;
+        while (*q == ' ') q++;
+        if (*q >= '0' && *q <= '9') { seed = (int32_t)(parse_u(q) % NOISE_SPAN); sprintf(msg2, "seed %lu (repeatable)", (uint32_t)seed); }
+        else { seed = -1; sprintf(msg2, "seed from the time Return is pressed"); }
+        say(5, msg2);
+      } else if (!strncmp(line, "/len ", 5)) {
         uint32_t v = parse_u(line + 5);
         if (v) n_gen = v;
-      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /verify /tok TEXT /step /new /len N /rows 25|50");
+      } else status(2, "/regs /scan /models /hdr N /load N [direct|port|slow] /check /verify /tok TEXT /step /new /len N /temp T /seed [N] /rows 25|50");
       continue;
     }
     if (cur < 0) { status(2, "no model loaded: /load N"); continue; }

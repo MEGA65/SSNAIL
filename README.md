@@ -306,6 +306,15 @@ Header `$06` flags: bit 0 set = encoder image (BERT).
 | $4C | `generated`: tokens generated so far this run | script |
 | $50 | `stop_request`: non-zero = stop after the current token | CPU |
 | $54 | `stop_reason`: 1 count, 2 EOS, 3 context full, 4 stop request | script |
+| $58 | `sample`: non-zero = sample at the temperature in the T vector; 0 = greedy | CPU |
+| $5C | `noise`: the sampling noise window's offset (< 4096): CPU seeds, script steps | CPU, then script |
+
+Sampling (decoders): before each ARGMAX, with `sample` set, the script adds T × noise
+to the logits (Gumbel-max: the argmax then picks token *i* with probability
+softmax(logits / T)), from a noise table in the image whose window at `noise` steps
+by 1031 (mod 4096) each token.  The T vector, at header `$68` (vocab × F32, T in
+every element), is the CPU's to fill; header `$68` = 0 means an image without
+sampling.  `ssnail_chat.py --hw --temp T` drives exactly this.
 
 ### Running a generation (what MEGA65 software does)
 
