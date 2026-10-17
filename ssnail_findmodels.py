@@ -139,6 +139,32 @@ def base_name(name):
     return re.sub(r"[-_.]+", "-", n).strip("-")
 
 
+def list_entries(listfile):
+    """(url, file name, options) for each line of a model list: a URL, then
+    optional name=value options (mem=72: convert for that memory size), then
+    an optional # comment."""
+    out = []
+    for line in open(listfile):
+        words = line.split("#")[0].split()
+        if not words:
+            continue
+        url = words[0]
+        name = urllib.parse.unquote(url.rstrip("/").split("/")[-1].split("?")[0])
+        opts = dict(w.split("=", 1) for w in words[1:] if "=" in w)
+        out.append((url, name, opts))
+    return out
+
+
+def make_vars(listfile):
+    """The list's per-model options as make variables (MEM_<stem> := 72)."""
+    lines = []
+    for _, name, opts in list_entries(listfile):
+        stem = name[:-5] if name.endswith(".gguf") else name
+        if "mem" in opts:
+            lines.append(f"MEM_{stem} := {int(opts['mem'])}")
+    return "\n".join(lines) + "\n"
+
+
 def fetch_list(listfile, outdir):
     """Download each URL in listfile (one per line, # comments) to outdir,
     skipping files already there; a partial download is kept as .part and
@@ -146,11 +172,7 @@ def fetch_list(listfile, outdir):
     import os
     os.makedirs(outdir, exist_ok=True)
     failed = 0
-    for line in open(listfile):
-        url = line.split("#")[0].strip()
-        if not url:
-            continue
-        name = urllib.parse.unquote(url.rstrip("/").split("/")[-1].split("?")[0])
+    for url, name, _ in list_entries(listfile):
         path = os.path.join(outdir, name)
         if os.path.exists(path):
             continue
@@ -184,6 +206,8 @@ def main():
                     help="also list encoders (BERT, MiniLM: embeddings, not text)")
     ap.add_argument("--names", metavar="FILE",
                     help="no search: print the file name of each URL in FILE (for make)")
+    ap.add_argument("--make-vars", metavar="FILE",
+                    help="no search: print FILE's per-model options as make variables")
     ap.add_argument("--all-arch", action="store_true",
                     help="also list architectures SSNAIL can't run yet")
     ap.add_argument("--fetch", metavar="FILE",
@@ -197,10 +221,11 @@ def main():
     if args.fetch:
         sys.exit(fetch_list(args.fetch, args.dir))
     if args.names:
-        for line in open(args.names):
-            url = line.split("#")[0].strip()
-            if url:
-                print(urllib.parse.unquote(url.rstrip("/").split("/")[-1].split("?")[0]))
+        for _, name, _ in list_entries(args.names):
+            print(name)
+        return
+    if args.make_vars:
+        sys.stdout.write(make_vars(args.make_vars))
         return
     supported = SUPPORTED + (ENCODERS if args.encoders else ())
     queries = args.queries or DEFAULT_QUERIES + (ENCODER_QUERIES if args.encoders else [])

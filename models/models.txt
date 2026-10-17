@@ -16,5 +16,7 @@ https://huggingface.co/tiiuae/Falcon-H1-Tiny-R-90M-GGUF/resolve/main/Falcon-H1R-
 # more of the family (f16, from mradermacher: tiiuae publish no GGUF of these)
 https://huggingface.co/mradermacher/Falcon-H1-Tiny-90M-Base-GGUF/resolve/main/Falcon-H1-Tiny-90M-Base.f16.gguf
 https://huggingface.co/mradermacher/Falcon-H1-Tiny-90M-Instruct-Curriculum-GGUF/resolve/main/Falcon-H1-Tiny-90M-Instruct-Curriculum.f16.gguf
-# (Falcon-H1-Tiny-Multilingual-100M: a 65536-token vocabulary, so it needs 72 MB
-# as Q4_0: MODELS_MEM=72)
+# Falcon-H1-Tiny-Multilingual-100M: a 65536-token vocabulary, so 72 MB (SDRAM,
+# then HyperRAM) as Q4_0
+https://huggingface.co/mradermacher/Falcon-H1-Tiny-Multilingual-100M-Instruct-GGUF/resolve/main/Falcon-H1-Tiny-Multilingual-100M-Instruct.f16.gguf mem=72
+https://huggingface.co/mradermacher/Falcon-H1-Tiny-Multilingual-100M-Base-GGUF/resolve/main/Falcon-H1-Tiny-Multilingual-100M-Base.f16.gguf mem=72

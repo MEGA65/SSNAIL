@@ -48,7 +48,8 @@
 #                   default context, and foo.ctxN.ssnail for each N in MODELS_CTX
 #                   the model was trained for (ATTN takes at most 1024 positions)
 #   MODELS_CTX      default 512 1024
-#   MODELS_MEM      allmodels' memory size: 8, 64 or 72 (default 64: R4-R6 SDRAM)
+#   MODELS_MEM      allmodels' memory size: 8, 64 or 72 (default 64: R4-R6 SDRAM);
+#                   a line of models.txt can set its own: "URL mem=72"
 
 SSNAIL_TOOLS ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PYTHON       ?= python3
@@ -146,7 +147,12 @@ MODEL_STEMS = $(patsubst $(MODELS_DIR)/%.gguf,%,$(MODEL_GGUFS))
 allmodels-images: $(MODEL_STEMS:%=$(MODELS_OUT)/%.ssnail) \
   $(foreach c,$(MODELS_CTX),$(MODEL_STEMS:%=$(MODELS_OUT)/%.ctx$(c).ssnail))
 
-MODEL_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(MODELS_MEM) $(if $(TYPE),--type "$(TYPE)")
+# Per-model options from the list (MEM_<stem>), regenerated when it changes
+$(MODELS_DIR)/models.mk: $(MODEL_LIST) $(SSNAIL_TOOLS)ssnail_findmodels.py
+	$(PYTHON) $(SSNAIL_TOOLS)ssnail_findmodels.py --make-vars $< > $@
+-include $(MODELS_DIR)/models.mk
+
+MODEL_OPTS = --wtype $(WTYPE) --fallback $(FALLBACK) --mem-mb $(or $(MEM_$*),$(MODELS_MEM)) $(if $(TYPE),--type "$(TYPE)")
 
 $(MODELS_OUT)/%.ssnail: $(MODELS_DIR)/%.gguf $(TOOL_DEPS)
 	@mkdir -p $(MODELS_OUT)
