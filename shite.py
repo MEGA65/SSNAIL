@@ -387,7 +387,10 @@ OP_END, OP_I8, OP_I32, OP_I64, OP_F64, OP_STR, OP_FIX, OP_REF, OP_RECT, OP_HOSTC
     OP_JZ, OP_JMP, OP_CALL, OP_CELLS = range(14)
 OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW, OP_NEG, OP_PCT, OP_CONCAT = range(0x10, 0x18)
 OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE = range(0x18, 0x1E)
-FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT = range(5)
+FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT, FN_COUNTA, FN_PRODUCT, FN_ABS, FN_INT, \
+    FN_TRUNC, FN_ROUND, FN_SIGN, FN_SQRT, FN_MOD, FN_AND, FN_OR, FN_NOT = range(17)
+AGGREGATES = (FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT, FN_COUNTA, FN_PRODUCT, FN_AND, FN_OR)
+ARITY = {FN_ABS: 1, FN_INT: 1, FN_TRUNC: 1, FN_SIGN: 1, FN_MOD: 2, FN_NOT: 1}
 STACK_DEPTH = 32
 _BINOPS = {OP_ADD: "ADD", OP_SUB: "SUB", OP_MUL: "MUL", OP_DIV: "DIV", OP_EQ: "EQ",
            OP_NE: "NE", OP_LT: "LT", OP_LE: "LE", OP_GT: "GT", OP_GE: "GE"}
@@ -528,10 +531,26 @@ class Sheetview:
 
 
 def aggregate(sv, fid, args):
-    """SUM AVERAGE MIN MAX COUNT over the arguments, in order (section 4)."""
+    """The aggregates over the arguments, in order (section 5.7)."""
+    def items():
+        """(value, from cells) of every argument, ranges and lists expanded."""
+        for a in args:
+            if a.kind == "l":
+                for r, c in a.v:
+                    if r >= sv.d.nrows or c >= sv.d.ncols:
+                        raise Abort(E_REF)
+                    yield sv.value(sv.find(r, c)), True
+            elif a.kind == "r":
+                r1, c1, r2, c2 = a.v
+                for r in range(r1, min(r2, sv.d.nrows - 1) + 1):
+                    for c in sv.row_cells(r, c1, c2):
+                        yield sv.value(c), True
+            else:
+                yield a, a.ref
+    if fid == FN_COUNTA:                 # every value but blanks, errors too
+        return V("i", sum(1 for v, _ in items() if v.kind != "z"))
     nums = []
-
-    def take(v, from_cells):
+    for v, from_cells in items():
         if v.kind == "e":
             raise Abort(v.v)
         if v.kind in ("i", "f"):
@@ -539,21 +558,16 @@ def aggregate(sv, fid, args):
         elif v.kind in ("t", "z"):
             if not from_cells:
                 raise Abort(E_VALUE)
-    for a in args:
-        if a.kind == "l":
-            for r, c in a.v:
-                if r >= sv.d.nrows or c >= sv.d.ncols:
-                    raise Abort(E_REF)
-                take(sv.value(sv.find(r, c)), True)
-        elif a.kind == "r":
-            r1, c1, r2, c2 = a.v
-            for r in range(r1, min(r2, sv.d.nrows - 1) + 1):
-                for c in sv.row_cells(r, c1, c2):
-                    take(sv.value(c), True)
-        else:
-            take(a, a.ref)
     if fid == FN_COUNT:
         return V("i", len(nums))
+    if fid in (FN_AND, FN_OR):
+        if not nums:
+            return err(E_VALUE)
+        for v in nums:
+            if v.kind == "i" and bad_k(v.k):
+                return err(E_NUM)
+        t = [v.v != 0 for v in nums]
+        return V("i", int(all(t) if fid == FN_AND else any(t)))
     if fid in (FN_MIN, FN_MAX):
         if not nums:
             return V("i", 0)
@@ -565,6 +579,15 @@ def aggregate(sv, fid, args):
             if better.v:
                 best = v
         return V(best.kind, best.v, best.k)
+    if fid == FN_PRODUCT:
+        if not nums:
+            return V("i", 0)
+        p = V("i", 1)
+        for v in nums:
+            p = binop("MUL", p, v)
+            if p.kind == "e":
+                return p
+        return p
     s = V("i", 0)
     for v in nums:
         s = binop("ADD", s, v)
@@ -575,6 +598,91 @@ def aggregate(sv, fid, args):
     if not nums:
         return err(E_DIV0)
     return binop("DIV", s, V("i", len(nums)))
+
+
+def truth(v):
+    """IF's and NOT's test: zero (blank, I64 0, F64 +-0) is false; errors
+    and text end the formula (#VALUE! for text)."""
+    if v.kind == "e":
+        raise Abort(v.v)
+    if v.kind in ("t", "r", "l"):
+        raise Abort(E_VALUE)
+    if v.kind == "z":
+        return False
+    if v.kind == "i" and bad_k(v.k):
+        raise Abort(E_NUM)
+    return v.v != 0
+
+
+def zsign(r, x):
+    """r (a float), with x's sign when it is zero (IEEE floor and trunc)."""
+    import math
+    return math.copysign(0.0, x) if r == 0 else float(r)
+
+
+def scalar_fn(fid, args):
+    """ABS INT TRUNC SIGN MOD NOT (section 5.7)."""
+    import math
+    if len(args) != ARITY[fid]:
+        return err(E_VALUE)
+    if fid == FN_NOT:
+        a = as_num(args[0])
+        if a.kind == "e":
+            return a
+        return V("i", int(a.v == 0))
+    a = as_num(args[0])
+    if a.kind == "e":
+        return a
+    k, binary = a.k & 0x7F, bool(a.k & 0x80)
+    if fid == FN_ABS:
+        return i64(abs(a.v), a.k) if a.kind == "i" else V("f", abs(a.v))
+    if fid == FN_SIGN:
+        if a.kind == "f" and math.isnan(a.v):
+            return err(E_NUM)
+        return V("i", (a.v > 0) - (a.v < 0))
+    if fid in (FN_INT, FN_TRUNC):
+        if a.kind == "f":
+            if math.isinf(a.v) or math.isnan(a.v):
+                return a
+            return V("f", zsign(math.floor(a.v) if fid == FN_INT else math.trunc(a.v), a.v))
+        if k == 0:
+            return V("i", a.v)
+        if fid == FN_INT:
+            return V("i", a.v >> k if binary else a.v // 10 ** k)
+        m = abs(a.v) >> k if binary else abs(a.v) // 10 ** k
+        return V("i", -m if a.v < 0 else m)
+    # MOD: a - b * floor(a / b), the divisor's sign
+    b = as_num(args[1])
+    if b.kind == "e":
+        return b
+    if b.v == 0:
+        return err(E_DIV0)
+    if a.kind == "i" and b.kind == "i":
+        sb = same_base(a, b)
+        if sb is not None:
+            binary, ka, kb = sb
+            kk = max(ka, kb)
+            va, vb = scale_up(a.v, ka, kk, binary), scale_up(b.v, kb, kk, binary)
+            if va is None or vb is None:
+                return err(E_NUM)
+            return V("i", va % vb, kk | (0x80 if binary and kk else 0))
+    x, y = to_f64(a), to_f64(b)
+    q = ftz(x / y) if y != 0 else float("nan")
+    if math.isinf(q) or math.isnan(q):
+        return V("f", float("nan"))
+    t = ftz(y * zsign(math.floor(q), q))
+    return V("f", ftz(x - t))
+
+
+def pct(a):
+    """%: / 100, exactly for integers (two more decimals of fixed point)."""
+    a = as_num(a)
+    if a.kind == "e":
+        return a
+    k = a.k & 0x7F
+    if a.kind == "i" and not (k and a.k & 0x80) and k + 2 <= DEC_KMAX:
+        return V("i", a.v, k + 2)
+    return V("f", ftz(to_f64(a) / 100.0))
 
 
 def evaluate(sv, code, frow, fcol):
@@ -649,15 +757,17 @@ def evaluate(sv, code, frow, fcol):
                     raise Abort(E_STACK)
                 args = st[len(st) - argc:]
                 del st[len(st) - argc:]
-                push(aggregate(sv, fid, args) if fid <= FN_COUNT else err(E_NAME))
+                push(aggregate(sv, fid, args) if fid in AGGREGATES else
+                     scalar_fn(fid, args) if fid in ARITY else err(E_NAME))
             elif op in _BINOPS:
                 b = pop(); a = pop()
                 push(binop(_BINOPS[op], a, b))
             elif op == OP_NEG:
                 push(neg(pop()))
-            elif op in (OP_POW, OP_PCT, OP_CONCAT):         # not in this phase
-                if op != OP_PCT:
-                    pop()
+            elif op == OP_PCT:
+                push(pct(pop()))
+            elif op in (OP_POW, OP_CONCAT):                 # not in this phase
+                pop()
                 pop()
                 push(err(E_NAME))
             elif op == OP_STR:
@@ -665,7 +775,12 @@ def evaluate(sv, code, frow, fcol):
                 i += n
                 push(err(E_NAME))
             elif op in (OP_JZ, OP_JMP):
-                raise Abort(E_NAME)
+                if i + 2 > len(code):
+                    raise Abort(E_STACK)
+                off = code[i] | code[i + 1] << 8
+                i += 2
+                if op == OP_JMP or not truth(pop()):
+                    i += off
             else:
                 raise Abort(E_STACK)
     except Abort as e:
@@ -823,6 +938,21 @@ class F:
 
     def op(self, o):
         self.b += bytes([o])
+        return self
+
+    def jz(self):
+        """JZ with its offset to fill in (patch(at))."""
+        self.b += bytes([OP_JZ, 0, 0])
+        return len(self.b)
+
+    def jmp(self):
+        self.b += bytes([OP_JMP, 0, 0])
+        return len(self.b)
+
+    def patch(self, at):
+        """The jump ending at `at` lands here."""
+        off = len(self.b) - at
+        self.b[at - 2:at] = bytes([off & 0xFF, off >> 8])
         return self
 
     def end(self):
