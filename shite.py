@@ -91,21 +91,26 @@ class Descriptor:
 def cells_in_block(m, b, row):
     """(granule offset, header bytes) of each cell but FREE ones, in memory
     order, checking the block's structure."""
+    return list(iter_cells(m, b, row))
+
+
+def iter_cells(m, b, row):
+    """As cells_in_block, one cell at a time: a malformed cell raises only
+    when the walk reaches it (RECALC has evaluated the cells before it)."""
     if u32(m, b + R_ROW) != row:
         raise ShiteFormatError(row, "row number does not match the row table")
     blen, free = u16(m, b + R_LEN), u16(m, b + R_FREE)
     if free == 0 or free > blen or blen > MAX_BLOCK:
         raise ShiteFormatError(row, "first free granule outside the block")
-    out, g = [], 1
+    g = 1
     while g < free:
         h = m.read(b + GRANULE * g, 8)
         n = h[4]
         if n == 0 or g + n > free:
             raise ShiteFormatError(row, f"cell at granule {g}: bad length {n}")
         if h[3] & 0x0F != K_FREE:
-            out.append((g, h))
+            yield g, h
         g += n
-    return out
 
 
 def find_cell(m, desc_addr, row, col):
@@ -708,7 +713,7 @@ def recalc(m, desc_addr, r1, r2, c1, c2, begin=True, end=True):
         if b is None:
             continue
         row_changed = 0
-        for g, h in cells_in_block(m, b, row):
+        for g, h in iter_cells(m, b, row):
             col = hdr_col(h)
             if h[3] & 0x0F != K_FORMULA or not c1 <= col <= c2:
                 continue

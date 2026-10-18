@@ -403,18 +403,18 @@ class Asm:
     def label(self, name):
         self.labels[name] = len(self.code)
 
-    def __call__(self, op, a=0, b=0, x=0, y=0, z=0):
-        self.code.append([op, a, b, x, y, z])
+    def __call__(self, op, a=0, b=0, x=0, y=0, z=0, c=0):
+        self.code.append([op, a, b, x, y, z, c])
 
     def jump(self, target):
         self(I.BEQ, I.RZERO, I.RZERO, target)
 
     def assemble(self, base):
         out = bytearray()
-        for op, a, b, x, y, z in self.code:
+        for op, a, b, x, y, z, c in self.code:
             if isinstance(x, str):
                 x = base + 16 * self.labels[x]
-            out += I.encode(op, a, b, x, y, z)
+            out += I.encode(op, a, b, x, y, z, c)
         return bytes(out)
 
 

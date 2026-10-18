@@ -239,8 +239,8 @@ def reg_addr(areg, offset=0):
     return 0x80000000 | (areg << 24) | offset
 
 
-def encode(op, a=0, b=0, x=0, y=0, z=0):
-    return struct.pack("<BBBBIII", op, a & 0xFF, b & 0xFF, 0,
+def encode(op, a=0, b=0, x=0, y=0, z=0, c=0):
+    return struct.pack("<BBBBIII", op, a & 0xFF, b & 0xFF, c & 0xFF,
                        x & 0xFFFFFFFF, y & 0xFFFFFFFF, z & 0xFFFFFFFF)
 
 
