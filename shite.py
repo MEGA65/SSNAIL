@@ -740,8 +740,18 @@ def power(a, b):
     return V("f", f_powi(to_f64(a), n))
 
 
+def f_parts(x):
+    """A finite nonzero F64 as (m, E): |x| = m x 2^E, m < 2^53."""
+    import struct as _s
+    b = _s.unpack("<Q", _s.pack("<d", x))[0]
+    e, f = b >> 52 & 0x7FF, b & ((1 << 52) - 1)
+    return (1 << 52 | f), e - 1075
+
+
 def round_fn(a, b):
-    """ROUND(x, n): half away from zero, n an integer -18..18."""
+    """ROUND(x, n): half away from zero, n an integer -18..18, exactly
+    (section 5.7)."""
+    import math
     a, b = as_num(a), as_num(b)
     if a.kind == "e":
         return a
@@ -759,9 +769,25 @@ def round_fn(a, b):
             return V("i", q, n)
         return i64(q * 10 ** -n)
     x = to_f64(a)
+    if x == 0 or math.isinf(x) or math.isnan(x):
+        return V("f", x)
+    neg = x < 0
+    m, e = f_parts(x)
     if n >= 0:
-        return V("f", f_div(f_round_away(ftz(x * float(10 ** n))), float(10 ** n)))
-    return V("f", ftz(f_round_away(f_div(x, float(10 ** -n))) * float(10 ** -n)))
+        p = m * 10 ** n                       # |x| x 10^n = p x 2^e, exactly
+        if e >= 0 or (p >> -e) >= 1 << 53:
+            return V("f", x)                  # (no digits to round, or within an ulp)
+        sh = -e
+        nn = (p + (1 << (sh - 1))) >> sh       # half away from zero (on the magnitude)
+        r = f_div(float(nn), float(10 ** n))
+    else:
+        if abs(x) >= 2.0 ** 63:
+            return V("f", x)
+        whole = m << e if e >= 0 else m >> -e  # the integer part: the fraction cannot matter
+        q, rem = divmod(whole, 10 ** -n)
+        nn = q + (rem >= 5 * 10 ** (-n - 1))
+        r = float(nn * 10 ** -n)
+    return V("f", ftz(-r if neg else r))
 
 
 def sqrt_fn(a):
