@@ -27,6 +27,8 @@
 #   make test
 #   make client                          # the MEGA65 chat front end: client/ssnailchat.prg,
 #                                        # and sdcard/SSNCHAT.D81 holding it (llvm-mos)
+#   make klopapier                       # KLOPAPIER, the spreadsheet on SHITE:
+#                                        # client/klopapier.prg, sdcard/KLOPAPIR.D81
 #   make tokcheck-c                      # the client's tokenizer vs ssnail_tok.py, on
 #                                        # every image in MODELS_OUT
 #
@@ -90,7 +92,7 @@ LIBC_SRC      = $(addprefix $(LIBC)/src/,memory.c targets.c llvm/fileio.s llvm/d
 CLIENT_SRC    = $(addprefix $(SSNAIL_TOOLS)client/,ssnail_chat.c ssnail_tokc.c ssnail_tokc.h)
 M65WRAP       = $(SSNAIL_TOOLS)m65wrap/m65wrap
 
-.PHONY: test test-falcon clean findmodels fetch modellist allmodels allmodels-images client tokcheck-c %.all %.chat %.run %.tokcheck
+.PHONY: test test-falcon clean findmodels fetch modellist allmodels allmodels-images client klopapier tokcheck-c %.all %.chat %.run %.tokcheck
 .PRECIOUS: %.ssnail
 
 %.ssnail: %.gguf $(TOOL_DEPS)
@@ -169,6 +171,22 @@ endef
 $(foreach c,$(MODELS_CTX),$(eval $(call CTX_RULE,$(c))))
 
 client: $(SSNAIL_TOOLS)client/ssnailchat.prg sdcard/SSNCHAT.D81
+
+# KLOPAPIER, the spreadsheet on SHITE (SSNAIL's spreadsheet engine):
+# client/klopapier.prg and sdcard/KLOPAPIR.D81
+klopapier: $(SSNAIL_TOOLS)client/klopapier.prg sdcard/KLOPAPIR.D81
+
+$(SSNAIL_TOOLS)client/klopapier64.prg: $(SSNAIL_TOOLS)client/klopapier.c $(LIBC)/include/mega65/memory.h
+	$(MOS_CC) -Os -Wall -I $(LIBC)/include -o $@ $< $(LIBC_SRC)
+
+$(SSNAIL_TOOLS)client/klopapier.prg: $(SSNAIL_TOOLS)client/klopapier64.prg $(M65WRAP)
+	rm -f $@
+	$(M65WRAP) -o $@ $<
+
+sdcard/KLOPAPIR.D81: $(SSNAIL_TOOLS)client/klopapier.prg
+	@mkdir -p sdcard
+	rm -f $@
+	c1541 -format "klopapier,kp" d81 $@ -write $< "klopapier" > /dev/null
 
 $(LIBC)/include/mega65/memory.h:
 	git -C $(SSNAIL_TOOLS) submodule update --init mega65-libc
