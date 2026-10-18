@@ -390,7 +390,9 @@ OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE = range(0x18, 0x1E)
 FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT, FN_COUNTA, FN_PRODUCT, FN_ABS, FN_INT, \
     FN_TRUNC, FN_ROUND, FN_SIGN, FN_SQRT, FN_MOD, FN_AND, FN_OR, FN_NOT = range(17)
 AGGREGATES = (FN_SUM, FN_AVERAGE, FN_MIN, FN_MAX, FN_COUNT, FN_COUNTA, FN_PRODUCT, FN_AND, FN_OR)
-ARITY = {FN_ABS: 1, FN_INT: 1, FN_TRUNC: 1, FN_SIGN: 1, FN_MOD: 2, FN_NOT: 1}
+FN_POWER = 29
+ARITY = {FN_ABS: 1, FN_INT: 1, FN_TRUNC: 1, FN_SIGN: 1, FN_MOD: 2, FN_NOT: 1, FN_ROUND: 2,
+         FN_SQRT: 1, FN_POWER: 2}
 STACK_DEPTH = 32
 _BINOPS = {OP_ADD: "ADD", OP_SUB: "SUB", OP_MUL: "MUL", OP_DIV: "DIV", OP_EQ: "EQ",
            OP_NE: "NE", OP_LT: "LT", OP_LE: "LE", OP_GT: "GT", OP_GE: "GE"}
@@ -625,6 +627,12 @@ def scalar_fn(fid, args):
     import math
     if len(args) != ARITY[fid]:
         return err(E_VALUE)
+    if fid == FN_POWER:
+        return power(*args)
+    if fid == FN_ROUND:
+        return round_fn(*args)
+    if fid == FN_SQRT:
+        return sqrt_fn(args[0])
     if fid == FN_NOT:
         a = as_num(args[0])
         if a.kind == "e":
@@ -672,6 +680,99 @@ def scalar_fn(fid, args):
         return V("f", float("nan"))
     t = ftz(y * zsign(math.floor(q), q))
     return V("f", ftz(x - t))
+
+
+def f_round_away(y):
+    """An F64 rounded half away from zero to an integer, exactly (a zero
+    keeps y's sign)."""
+    import math
+    if math.isinf(y) or math.isnan(y) or abs(y) >= 2.0 ** 52:
+        return y
+    t = math.trunc(y)
+    f = y - t                                # (exact)
+    r = t + (1 if f >= 0.5 else -1 if f <= -0.5 else 0)
+    return zsign(r, y)
+
+
+def f_div(x, y):
+    """F64 x / y with IEEE's infinities for a zero y (callers exclude 0/0)."""
+    import math
+    if y == 0:
+        return math.copysign(float("inf"), x) * math.copysign(1.0, y)
+    return ftz(x / y)
+
+
+def f_powi(x, n):
+    """x^n for an integer n, F64, by square and multiply from the low bit
+    (a square only while bits remain), then 1 / r for n < 0."""
+    r, b, m = 1.0, x, abs(n)
+    while m:
+        if m & 1:
+            r = ftz(r * b)
+        m >>= 1
+        if m:
+            b = ftz(b * b)
+    return f_div(1.0, r) if n < 0 else r
+
+
+def power(a, b):
+    """a ^ b (section 5.7)."""
+    a, b = as_num(a), as_num(b)
+    if a.kind == "e":
+        return a
+    if b.kind == "e":
+        return b
+    if not (b.kind == "i" and b.k & 0x7F == 0):
+        return err(E_NAME)                   # (a fractional exponent: the transcendentals)
+    n = b.v
+    zero = a.v == 0
+    if zero and n == 0:
+        return err(E_NUM)
+    if zero and n < 0:
+        return err(E_DIV0)
+    if a.kind == "i" and n >= 0:
+        k, binary = a.k & 0x7F, bool(a.k & 0x80)
+        if k * n <= (BIN_KMAX if binary else DEC_KMAX):
+            p = a.v ** n
+            if not I64_MIN <= p <= I64_MAX:
+                return err(E_NUM)
+            return V("i", p, (k * n) | (0x80 if binary and k * n else 0))
+    return V("f", f_powi(to_f64(a), n))
+
+
+def round_fn(a, b):
+    """ROUND(x, n): half away from zero, n an integer -18..18."""
+    a, b = as_num(a), as_num(b)
+    if a.kind == "e":
+        return a
+    if b.kind == "e":
+        return b
+    if not (b.kind == "i" and b.k & 0x7F == 0) or not -18 <= b.v <= 18:
+        return err(E_NUM)
+    n = b.v
+    k, binary = a.k & 0x7F, bool(a.k & 0x80)
+    if a.kind == "i" and not (k and binary):
+        if n >= k:
+            return V("i", a.v, a.k)
+        q = div_away(a.v, 10 ** (k - n))
+        if n >= 0:
+            return V("i", q, n)
+        return i64(q * 10 ** -n)
+    x = to_f64(a)
+    if n >= 0:
+        return V("f", f_div(f_round_away(ftz(x * float(10 ** n))), float(10 ** n)))
+    return V("f", ftz(f_round_away(f_div(x, float(10 ** -n))) * float(10 ** -n)))
+
+
+def sqrt_fn(a):
+    import math
+    a = as_num(a)
+    if a.kind == "e":
+        return a
+    x = to_f64(a)
+    if x < 0:
+        return err(E_NUM)
+    return V("f", ftz(math.sqrt(x)))
 
 
 def pct(a):
@@ -766,7 +867,10 @@ def evaluate(sv, code, frow, fcol):
                 push(neg(pop()))
             elif op == OP_PCT:
                 push(pct(pop()))
-            elif op in (OP_POW, OP_CONCAT):                 # not in this phase
+            elif op == OP_POW:
+                b = pop(); a = pop()
+                push(power(a, b))
+            elif op == OP_CONCAT:                           # not in this phase
                 pop()
                 pop()
                 push(err(E_NAME))

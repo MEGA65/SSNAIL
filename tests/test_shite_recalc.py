@@ -60,7 +60,7 @@ sh.formula(2, 5, F().f(0.1).f(0.2).op(SH.OP_ADD).end())
 sh.formula(2, 6, F().i(1).i(0).op(SH.OP_DIV).end())                               # #DIV/0!
 sh.formula(2, 7, F().ref(25, 0).end())                                            # off the sheet: #REF!
 sh.formula(2, 8, F().ref(-1, -6).end())                                           # C2 uncompiled: #COMPILE!
-sh.formula(2, 9, F().i(2).i(3).op(SH.OP_POW).end())                               # not in this phase: #NAME?
+sh.formula(2, 9, F().i(2).i(3).op(SH.OP_CONCAT).end())                            # not in this phase: #NAME?
 sh.formula(2, 10, F().rect((0, 0, True, True), (1, 4, True, True)).call(SH.FN_SUM, 1).end())  # error in range: #N/A
 sh.formula(2, 11, F().rect((0, 0, True, True), (0, 4, True, True)).call(SH.FN_SUM, 1).end())  # 10+32+0.5+19.99+3
 sh.formula(2, 12, F().rect((0, 0, True, True), (0, 4, True, True)).call(SH.FN_COUNT, 1).end())
