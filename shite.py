@@ -307,10 +307,18 @@ def same_base(a, b):
     return binary, ka, kb
 
 
+def bad_k(k):
+    """A fixed point past its limits (decimal 18, binary 62): #NUM!."""
+    return (k & 0x7F) > (BIN_KMAX if k & 0x80 else DEC_KMAX)
+
+
 def as_num(a):
-    """A scalar operand: 'z' is I64 0; ranges and text are #VALUE!."""
+    """A scalar operand: 'z' is I64 0; ranges and text are #VALUE!; an
+    integer whose fixed point is past its limits is #NUM!."""
     if a.kind == "z":
         return V("i", 0, 0)
+    if a.kind == "i" and bad_k(a.k):
+        return err(E_NUM)
     if a.kind in ("r", "t", "l"):
         return err(E_VALUE)
     return a
@@ -669,6 +677,8 @@ def store_form(v, fk):
     cell's fixed point fk (section 4)."""
     if v.kind == "z":
         v = V("i", 0)
+    if v.kind == "i" and (bad_k(v.k) or bad_k(fk)):
+        return K_ERROR, struct.pack("<Q", E_NUM)
     if v.kind == "i":
         k, kf = v.k & 0x7F, fk & 0x7F
         if k and kf and (v.k & 0x80) == (fk & 0x80):
