@@ -419,8 +419,15 @@ def sext(v, bits):
     return v - (1 << bits) if v & (1 << (bits - 1)) else v
 
 
+# A deleted reference (README 5.3): relative, both fields at their minimum
+DELETED_SHORT = 0xA0002000
+DELETED_LONG = 0x080000800000
+
+
 def long_ref(w, frow, fcol):
     """The long form's 48-bit payload: (row, col), absolute and wrapped."""
+    if w == DELETED_LONG:
+        return MAX_ROWS, 0                      # past every sheet: #REF!
     ra, ca = w >> 47 & 1, w >> 46 & 1
     rv, cv = w >> 24 & 0xFFFFF, w & 0xFFFFFF
     return (rv if ra else (frow + rv) % MAX_ROWS), (cv if ca else (fcol + cv) % MAX_COLS)
@@ -433,6 +440,8 @@ def ref_at(b, i, frow, fcol):
         if i + 4 > len(b):
             raise Abort(E_STACK)
         w = int.from_bytes(b[i:i + 4], "big")
+        if w == DELETED_SHORT:
+            return MAX_ROWS, 0, i + 4           # past every sheet: #REF!
         ra, rv = w >> 30 & 1, w >> 15 & 0x7FFF
         ca, cv = w >> 14 & 1, w & 0x3FFF
         row = rv if ra else (frow + sext(rv, 15)) % MAX_ROWS
