@@ -4,7 +4,7 @@ are in mega65-core's docs/shite/README.md.
 
 The instructions work on any object with read(addr, n) -> bytes and
 write(addr, data), as ssnail_sim.Machine (SSNAIL runs them as opcodes
-$40-$43).  Sheet builds sheets in such a memory for tests.
+$40-$43, $48, $49).  Sheet builds sheets in such a memory for tests.
 """
 import struct
 
@@ -153,17 +153,22 @@ def rebalance_row(m, desc_addr, first, last):
         b = d.row_block(row)
         if b is None:
             continue
-        cells = sorted(cells_in_block(m, b, row), key=lambda gh: hdr_col(gh[1]))
-        cols = [hdr_col(h) for _, h in cells]
-        if any(cols[i] == cols[i + 1] for i in range(len(cols) - 1)):
-            raise ShiteFormatError(row, "two cells in one column")
-        root, left, right = balanced_links(len(cells))
-        gr = lambda i: 0 if i < 0 else cells[i][0]
-        for i, (g, h) in enumerate(cells):
-            m.write(b + GRANULE * g, pack_hdr(hdr_col(h), h[3], h[4], gr(left[i]), gr(right[i])))
-        put16(m, b + R_NCELLS, len(cells))
-        put16(m, b + R_ROOT, gr(root))
-        put16(m, b + R_FLAGS, u16(m, b + R_FLAGS) & ~ROW_STALE)
+        rebalance_block(m, b, row)
+
+
+def rebalance_block(m, b, row):
+    """One row block's tree, count and root; its stale flag cleared."""
+    cells = sorted(cells_in_block(m, b, row), key=lambda gh: hdr_col(gh[1]))
+    cols = [hdr_col(h) for _, h in cells]
+    if any(cols[i] == cols[i + 1] for i in range(len(cols) - 1)):
+        raise ShiteFormatError(row, "two cells in one column")
+    root, left, right = balanced_links(len(cells))
+    gr = lambda i: 0 if i < 0 else cells[i][0]
+    for i, (g, h) in enumerate(cells):
+        m.write(b + GRANULE * g, pack_hdr(hdr_col(h), h[3], h[4], gr(left[i]), gr(right[i])))
+    put16(m, b + R_NCELLS, len(cells))
+    put16(m, b + R_ROOT, gr(root))
+    put16(m, b + R_FLAGS, u16(m, b + R_FLAGS) & ~ROW_STALE)
 
 
 # --- building sheets (tests, tools) -------------------------------------------
@@ -1016,6 +1021,279 @@ def recalc(m, desc_addr, r1, r2, c1, c2, begin=True, end=True):
         put32(m, a + D_ROUND, u32(m, a + D_ROUND) + 1)
         put32(m, a + D_PREVCHANGED, k)
     return changed_call
+
+
+# --- moving cells (MOVE_CELLS, CELLS_MOVED) -----------------------------------------
+# parameter block fields (README section 6)
+P_DESC, P_SR1, P_SC1, P_SR2, P_SC2, P_DR, P_DC, P_FR1, P_FR2 = 0, 4, 8, 12, 16, 20, 24, 28, 32
+P_HEAP, P_HEAPEND, P_DELETED, P_WHY, P_WROW, P_WCOL = 36, 40, 44, 48, 52, 56
+# why a move failed (ERR_FORMAT, P_WHY; 0: a malformed block, the row in the descriptor)
+MV_HEAP, MV_LONGROW, MV_FAR = 1, 2, 3
+
+
+class MoveError(Exception):
+    """A move that cannot be done: the sheet is left as it was."""
+    def __init__(self, why, row, col=0):
+        super().__init__(f"move failed ({why}) at row {row}, column {col}")
+        self.why, self.row, self.col = why, row, col
+
+
+class Move:
+    """The source rectangle S (clipped to the sheet) and its image D."""
+    def __init__(self, m, pb, d):
+        self.d = d
+        self.sr1, self.sc1 = u32(m, pb + P_SR1), u32(m, pb + P_SC1)
+        self.sr2 = min(u32(m, pb + P_SR2), d.nrows - 1)
+        self.sc2 = min(u32(m, pb + P_SC2), d.ncols - 1)
+        self.empty = self.sr1 > self.sr2 or self.sc1 > self.sc2
+        self.dr, self.dc = u32(m, pb + P_DR) % MAX_ROWS, u32(m, pb + P_DC) % MAX_COLS
+        self.dr2 = self.dr + self.sr2 - self.sr1
+        self.dc2 = self.dc + self.sc2 - self.sc1
+
+    def in_s(self, r, c):
+        return not self.empty and self.sr1 <= r <= self.sr2 and self.sc1 <= c <= self.sc2
+
+    def in_d(self, r, c):
+        return not self.empty and self.dr <= r <= self.dr2 and self.dc <= c <= self.dc2
+
+    def dest(self, r, c):
+        return r - self.sr1 + self.dr, c - self.sc1 + self.dc
+
+    def rebuilt(self, r):
+        """MOVE_CELLS builds this row afresh: a row of S or (on the sheet) of D."""
+        return not self.empty and (self.sr1 <= r <= self.sr2 or
+                                   self.dr <= r <= min(self.dr2, self.d.nrows - 1))
+
+
+def fix_refs(code, po, pn, mv):
+    """A formula's bytecode with its references rewritten for the move: each
+    read relative to po (where the formula was) and written relative to pn
+    (where it is now), in the same form.  (code, references made deleted);
+    MoveError(MV_FAR) when one does not fit its form.  A reference is to S:
+    it follows its cell (deleted if that left the sheet); to D but not S:
+    deleted (the cell there was overwritten); else it keeps its target."""
+    b = bytearray(code)
+    deleted = 0
+    d = mv.d
+
+    def fix(i, short):
+        nonlocal deleted
+        n = 4 if short else 6
+        w = int.from_bytes(b[i:i + n], "big")
+        if w == (DELETED_SHORT if short else DELETED_LONG):
+            return
+        if short:
+            ra, rv, ca, cv = w >> 30 & 1, w >> 15 & 0x7FFF, w >> 14 & 1, w & 0x3FFF
+            row = rv if ra else (po[0] + sext(rv, 15)) % MAX_ROWS
+            col = cv if ca else (po[1] + sext(cv, 14)) % MAX_COLS
+        else:
+            ra, ca = w >> 47 & 1, w >> 46 & 1
+            rv, cv = w >> 24 & 0xFFFFF, w & 0xFFFFFF
+            row = rv if ra else (po[0] + rv) % MAX_ROWS
+            col = cv if ca else (po[1] + cv) % MAX_COLS
+        gone = False
+        if mv.in_s(row, col):
+            row, col = mv.dest(row, col)
+            gone = row >= d.nrows or col >= d.ncols
+        elif mv.in_d(row, col):
+            gone = True
+        if gone:
+            nw = DELETED_SHORT if short else DELETED_LONG
+            deleted += 1
+        else:
+            ro = sext((row - pn[0]) % MAX_ROWS, 20)
+            co = sext((col - pn[1]) % MAX_COLS, 24)
+            if short:
+                fits = (row < 1 << 15 if ra else -(1 << 14) <= ro < 1 << 14) and \
+                       (col < 1 << 14 if ca else -(1 << 13) <= co < 1 << 13)
+                nw = 1 << 31 | ra << 30 | ((row if ra else ro) & 0x7FFF) << 15 | \
+                    ca << 14 | ((col if ca else co) & 0x3FFF)
+                fits = fits and nw != DELETED_SHORT
+            else:
+                nw = ra << 47 | ca << 46 | (row if ra else ro % MAX_ROWS) << 24 | \
+                    (col if ca else co % MAX_COLS)
+                fits = nw != DELETED_LONG
+            if not fits:
+                raise MoveError(MV_FAR, pn[0], pn[1])
+        b[i:i + n] = nw.to_bytes(n, "big")
+
+    i = 0
+    try:
+        while i < len(b):
+            op = b[i]
+            if op >= 0x80:
+                if i + 4 > len(b):
+                    break
+                fix(i, True)
+                i += 4
+                continue
+            i += 1
+            if op == OP_END:
+                break
+            elif op in (OP_I8, OP_FIX):
+                i += 1
+            elif op == OP_I32:
+                i += 4
+            elif op in (OP_I64, OP_F64):
+                i += 8
+            elif op in (OP_JZ, OP_JMP):
+                i += 2
+            elif op == OP_STR:
+                n, i = varlen(b, i)
+                i += n
+            elif op == OP_REF:
+                if i + 6 > len(b):
+                    break
+                fix(i, False)
+                i += 6
+            elif op == OP_HOSTCALL:
+                n, i = varlen(b, i)
+                i += n
+                if i + 6 > len(b):
+                    break
+                fix(i, False)
+                i += 6
+            elif op == OP_CALL:
+                _, i = varlen(b, i)
+                _, i = varlen(b, i)
+            elif op == OP_CELLS:                    # (its references follow as items)
+                _, i = varlen(b, i)
+            elif op == OP_RECT or OP_ADD <= op <= OP_GE:
+                pass                                # (RECT: two references follow)
+            else:
+                break                               # (malformed: left as it is)
+    except Abort:
+        pass
+    return bytes(b), deleted
+
+
+def fix_formula(m, c, po, pn, mv, write):
+    """fix_refs on the FORMULA cell at c: (changed, references made deleted).
+    write: store the bytecode and set CHANGED when it changed."""
+    n = u16(m, c + 26)
+    code = m.read(c + 32, n)
+    new, deleted = fix_refs(code, po, pn, mv)
+    if new != code and write:
+        m.write(c + 32, new)
+        m.write(c + 3, bytes([m.read(c + 3, 1)[0] | F_CHANGED]))
+    return new != code, deleted
+
+
+def _fix_rows(m, d, mv, r1, r2, write, skip_rebuilt, moved_view):
+    """fix_formula on every formula of rows r1..r2: (formulas changed,
+    references made deleted).  moved_view (CELLS_MOVED): a formula in D was
+    moved there, from S."""
+    changed = deleted = 0
+    for r in range(r1, min(r2, d.nrows - 1) + 1):
+        b = d.row_block(r)
+        if b is None or (skip_rebuilt and mv.rebuilt(r)):
+            continue
+        for g, h in iter_cells(m, b, r):
+            if h[3] & 0x0F != K_FORMULA:
+                continue
+            col = hdr_col(h)
+            po = (r, col)
+            if moved_view and mv.in_d(r, col):
+                po = (r - mv.dr + mv.sr1, col - mv.dc + mv.sc1)
+            ch, dl = fix_formula(m, b + GRANULE * g, po, (r, col), mv, write)
+            changed += ch
+            deleted += dl
+    return changed, deleted
+
+
+def _move_start(m, pb):
+    m.write(pb + P_WHY, bytes(8))               # (why, row: 0)
+    d = Descriptor(m, u32(m, pb + P_DESC))
+    return d, Move(m, pb, d)
+
+
+def _move_fail(m, pb, e):
+    put32(m, pb + P_WHY, e.why)
+    put32(m, pb + P_WROW, e.row)
+    put32(m, pb + P_WCOL, e.col)
+
+
+def move_cells(m, pb):
+    """MOVE_CELLS (parameter block at pb): the cells moved (R[a])."""
+    d, mv = _move_start(m, pb)
+    fr1, fr2 = u32(m, pb + P_FR1), u32(m, pb + P_FR2)
+    hs, he = u32(m, pb + P_HEAP), u32(m, pb + P_HEAPEND)
+    try:
+        # 1. the other formulas: checked, nothing written
+        _fix_rows(m, d, mv, fr1, fr2, False, True, False)
+        # 2. the rows of S and D, built afresh in the heap
+        hp, moved, deleted = hs, 0, 0
+        rows = [] if mv.empty else \
+            sorted(r for r in set(range(mv.sr1, mv.sr2 + 1)) | set(range(mv.dr, min(mv.dr2, d.nrows - 1) + 1)))
+        for r in rows:
+            hb, g = hp, 1
+            if hb + GRANULE > he:
+                raise MoveError(MV_HEAP, r)
+
+            def put(c, n, hdr):
+                nonlocal g
+                if g + n > MAX_BLOCK:
+                    raise MoveError(MV_LONGROW, r)
+                if hb + GRANULE * (g + n) > he:
+                    raise MoveError(MV_HEAP, r)
+                m.write(hb + GRANULE * g, hdr + m.read(c + 8, GRANULE * n - 8))
+                g += n
+                return hb + GRANULE * (g - n)
+            b = d.row_block(r)
+            if b is not None:
+                for gg, h in iter_cells(m, b, r):
+                    col = hdr_col(h)
+                    if mv.in_s(r, col) or mv.in_d(r, col):
+                        continue
+                    c = put(b + GRANULE * gg, h[4], bytes(h))
+                    if h[3] & 0x0F == K_FORMULA:
+                        deleted += fix_formula(m, c, (r, col), (r, col), mv, True)[1]
+            if mv.dr <= r <= mv.dr2:
+                rs = r - mv.dr + mv.sr1
+                b = d.row_block(rs)
+                if b is not None:
+                    for gg, h in iter_cells(m, b, rs):
+                        col = hdr_col(h)
+                        if not mv.sc1 <= col <= mv.sc2:
+                            continue
+                        nc = col - mv.sc1 + mv.dc
+                        if nc >= d.ncols:
+                            continue                # (moved off the sheet: dropped)
+                        c = put(b + GRANULE * gg, h[4], pack_hdr(nc, h[3] | F_CHANGED, h[4]))
+                        if h[3] & 0x0F == K_FORMULA:
+                            deleted += fix_formula(m, c, (rs, col), (r, nc), mv, True)[1]
+                        moved += 1
+            m.write(hb, struct.pack("<IHHHHHH", r, g, 0, 0, g, 0, 0))
+            rebalance_block(m, hb, r)
+            hp = hb + GRANULE * g
+        # 3. the row table: each new block (an empty one: no block)
+        p = hs
+        while p < hp:
+            r, n, k = struct.unpack("<IHH", m.read(p, 8))
+            put32(m, d.rowtab + 4 * r, p if k else EMPTY_ROW)
+            p += GRANULE * n
+        # 4. the other formulas, rewritten
+        deleted += _fix_rows(m, d, mv, fr1, fr2, True, True, False)[1]
+    except MoveError as e:
+        _move_fail(m, pb, e)
+        raise
+    put32(m, pb + P_HEAP, hp)
+    put32(m, pb + P_DELETED, deleted)
+    return moved
+
+
+def cells_moved(m, pb):
+    """CELLS_MOVED (parameter block at pb): the formulas changed (R[a])."""
+    d, mv = _move_start(m, pb)
+    fr1, fr2 = u32(m, pb + P_FR1), u32(m, pb + P_FR2)
+    try:
+        _fix_rows(m, d, mv, fr1, fr2, False, False, True)
+    except MoveError as e:
+        _move_fail(m, pb, e)
+        raise
+    changed, deleted = _fix_rows(m, d, mv, fr1, fr2, True, False, True)
+    put32(m, pb + P_DELETED, deleted)
+    return changed
 
 
 # --- assembling formulas (tests, tools) ----------------------------------------------

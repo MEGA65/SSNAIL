@@ -269,7 +269,7 @@ class Machine:
             elif op in (I.VMAX, I.VMIN):
                 p, q = self.f32v(self.ea(x), N0), self.f32v(self.ea(y), N0)
                 self.put_f32v(self.ea(z), H.vmax(p, q) if op == I.VMAX else H.vmin(p, q))
-            elif op in (I.RECALC, I.REBALANCE, I.FINDCELL, I.FORMATCELLS):
+            elif op in (I.RECALC, I.REBALANCE, I.FINDCELL, I.FORMATCELLS, I.MOVECELLS, I.CELLSMOVED):
                 self.shite(op, a, b, self.ea(x))
             elif op == I.MEANROWS:
                 rows = self.reg(a)
@@ -295,9 +295,17 @@ class Machine:
                               begin=bool(z & 1), end=bool(z & 2))
                 if a != I.RZERO:
                     self.R[a] = n
+            elif op in (I.MOVECELLS, I.CELLSMOVED):
+                n = (SH.move_cells if op == I.MOVECELLS else SH.cells_moved)(self, desc)
+                if a != I.RZERO:
+                    self.R[a] = n
             else:
                 raise SsnailError(f"SHITE op ${op:02X} not in this model yet")
+        except SH.MoveError as e:
+            raise SsnailError(f"ERR_FORMAT: {e}")
         except SH.ShiteFormatError as e:
+            if op in (I.MOVECELLS, I.CELLSMOVED):          # (X: the parameter block)
+                desc = SH.u32(self, desc + SH.P_DESC)
             if self.read(desc, 4) == SH.MAGIC:
                 SH.put32(self, desc + SH.D_BADROW, e.row)
             raise SsnailError(f"ERR_FORMAT: {e}")

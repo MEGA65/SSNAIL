@@ -81,6 +81,8 @@ COMPILE = 0x44    # formula text to bytecode (the codec): addr(X) = the paramete
 DECOMPILE = 0x45  # bytecode to formula text
 RENDER = 0x46     # a value into a field of screen text
 PARSE = 0x47      # typed text to a value
+MOVECELLS = 0x48  # move a rectangle of cells, references following: addr(X) = the parameter block; R[a] = cells moved
+CELLSMOVED = 0x49  # rewrite the references of formulas for a move made by the CPU; R[a] = formulas changed
 VPROJ16 = 0x33  # Z (N0 x int16) = sat(roundf(X / Y * s + o)), each step F32;
                 # s = N2, o = N1 as f32 bits (x / w to screen coordinates)
 
@@ -93,7 +95,7 @@ OPNAMES = {v: k for k, v in dict(
     VRECIP=VRECIP, VCVTI16=VCVTI16, VMAX=VMAX, VMIN=VMIN, VSUB=VSUB,
     VPROJ16=VPROJ16, RECALC=RECALC, REBALANCE=REBALANCE, FINDCELL=FINDCELL,
     FORMATCELLS=FORMATCELLS, COMPILE=COMPILE, DECOMPILE=DECOMPILE, RENDER=RENDER,
-    PARSE=PARSE).items()}
+    PARSE=PARSE, MOVECELLS=MOVECELLS, CELLSMOVED=CELLSMOVED).items()}
 
 GEMV_ACC = 0x01   # GEMV flag: accumulate into y (residual add)
 GEMV_F16OUT = 0x02  # GEMV flag: write y as F16 (e.g. straight into a KV cache)
